@@ -429,6 +429,7 @@ class Robot {
     const paramLimit = parseInt(process.env.EXPRESS_PARAMETER_LIMIT) || 1000
 
     const express = require('express')
+    const basicAuth = require('express-basic-auth')
     const multipart = require('connect-multiparty')
 
     const app = express()
@@ -439,7 +440,9 @@ class Robot {
     })
 
     if (user && pass) {
-      app.use(express.basicAuth(user, pass))
+      const authUsers = {}
+      authUsers[user] = pass
+      app.use(basicAuth({ users: authUsers }))
     }
     app.use(express.query())
 
