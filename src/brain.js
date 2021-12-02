@@ -205,6 +205,10 @@ class Brain extends EventEmitter {
     return result
   }
 
+  userForUsername(username) {
+    return this.data.users.find(user => user['username'] === username)
+  }
+
   // Public: Get all users whose names match fuzzyName. Currently, match
   // means 'starts with', but this could be extended to match initials,
   // nicknames, etc.
