@@ -441,7 +441,7 @@ class Robot {
 
     if (user && pass) {
       const authUsers = {}
-      const authUsers[user] = pass
+      authUsers[user] = pass
       app.use(basicAuth({ users: authUsers }))
     }
     app.use(express.query())
