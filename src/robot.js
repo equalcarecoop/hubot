@@ -1,12 +1,12 @@
 'use strict'
-
 const EventEmitter = require('events').EventEmitter
 const fs = require('fs')
 const path = require('path')
+const pathToFileURL = require('url').pathToFileURL
 
 const async = require('async')
-const Log = require('log')
-const HttpClient = require('scoped-http-client')
+const pino = require('pino')
+const HttpClient = require('./httpclient')
 
 const Brain = require('./brain')
 const Response = require('./response')
@@ -21,19 +21,17 @@ class Robot {
   // Robots receive messages from a chat source (Campfire, irc, etc), and
   // dispatch them to matching listeners.
   //
-  // adapterPath -  A String of the path to built-in adapters (defaults to src/adapters)
   // adapter     - A String of the adapter name.
   // httpd       - A Boolean whether to enable the HTTP daemon.
   // name        - A String of the robot name, defaults to Hubot.
   // alias       - A String of the alias of the robot name
-  constructor (adapterPath, adapter, httpd, name, alias) {
+  constructor (adapter, httpd, name, alias) {
     if (name == null) {
       name = 'Hubot'
     }
     if (alias == null) {
       alias = false
     }
-    this.adapterPath = path.join(__dirname, 'adapters')
 
     this.name = name
     this.events = new EventEmitter()
@@ -49,7 +47,16 @@ class Robot {
       response: new Middleware(this),
       receive: new Middleware(this)
     }
-    this.logger = new Log(process.env.HUBOT_LOG_LEVEL || 'info')
+    this.logger = pino({
+      name,
+      level: process.env.HUBOT_LOG_LEVEL || 'info'
+    })
+    Reflect.defineProperty(this.logger, 'warning', {
+      value: this.logger.warn,
+      enumerable: true,
+      configurable: true
+    })
+
     this.pingIntervalId = null
     this.globalHttpOptions = {}
 
@@ -60,9 +67,7 @@ class Robot {
       this.setupNullRouter()
     }
 
-    this.loadAdapter(adapter)
-
-    this.adapterName = adapter
+    this.adapterName = adapter ?? 'shell'
     this.errorHandlers = []
 
     this.on('error', (err, res) => {
@@ -132,7 +137,7 @@ class Robot {
     const name = this.name.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, '\\$&')
 
     if (regexStartsWithAnchor) {
-      this.logger.warning(`Anchors don’t work well with respond, perhaps you want to use 'hear'`)
+      this.logger.warning('Anchors don’t work well with respond, perhaps you want to use \'hear\'')
       this.logger.warning(`The regex in question was ${regex.toString()}`)
     }
 
@@ -204,7 +209,7 @@ class Robot {
   invokeErrorHandlers (error, res) {
     this.logger.error(error.stack)
 
-    this.errorHandlers.map((errorHandler) => {
+    this.errorHandlers.forEach((errorHandler) => {
       try {
         errorHandler(error, res)
       } catch (errorHandlerError) {
@@ -317,13 +322,13 @@ class Robot {
           // stack doesn't get too big
           process.nextTick(() =>
             // Stop processing when message.done == true
-            done(context.response.message.done)
+            done(null, context.response.message.done)
           )
         })
       } catch (err) {
         this.emit('error', err, new this.Response(this, context.response.message, []))
         // Continue to next listener when there is an error
-        done(false)
+        done(null, false)
       }
     },
     // Ignore the result ( == the listener that set message.done = true)
@@ -352,7 +357,7 @@ class Robot {
     const full = path.join(filepath, path.basename(filename, ext))
 
     // see https://github.com/hubotio/hubot/issues/1355
-    if (!require.extensions[ext]) { // eslint-disable-line
+    if (['.js', '.mjs', '.coffee'].indexOf(ext) == -1) { // eslint-disable-line
       return
     }
 
@@ -382,17 +387,6 @@ class Robot {
     if (fs.existsSync(path)) {
       fs.readdirSync(path).sort().map(file => this.loadFile(path, file))
     }
-  }
-
-  // Public: Load scripts specified in the `hubot-scripts.json` file.
-  //
-  // path    - A String path to the hubot-scripts files.
-  // scripts - An Array of scripts to load.
-  //
-  // Returns nothing.
-  loadHubotScripts (path, scripts) {
-    this.logger.debug(`Loading hubot-scripts from ${path}`)
-    Array.from(scripts).map(script => this.loadFile(path, script))
   }
 
   // Public: Load scripts from packages specified in the
@@ -435,18 +429,18 @@ class Robot {
     const app = express()
 
     app.use((req, res, next) => {
-      res.setHeader('X-Powered-By', `hubot/${this.name}`)
+      res.setHeader('X-Powered-By', `hubot/${encodeURI(this.name)}`)
       return next()
     })
 
     if (user && pass) {
-      const authUsers = {}
-      authUsers[user] = pass
-      app.use(basicAuth({ users: authUsers }))
+      const authUser = {}
+      authUser[user] = pass
+      app.use(basicAuth({ users: authUser }))
     }
     app.use(express.query())
 
-    app.use(express.json())
+    app.use(express.json({ limit }))
     app.use(express.urlencoded({ limit, parameterLimit: paramLimit, extended: true }))
     // replacement for deprecated express.multipart/connect.multipart
     // limit to 100mb, as per the old behavior
@@ -499,17 +493,31 @@ class Robot {
   // adapter - A String of the adapter name to use.
   //
   // Returns nothing.
-  loadAdapter (adapter) {
-    this.logger.debug(`Loading adapter ${adapter}`)
-
+  async loadAdapter (adapterPath = null) {
+    this.logger.debug(`Loading adapter ${adapterPath ?? 'from npmjs:'} ${this.adapterName}`)
+    const ext = path.extname(adapterPath ?? '') ?? '.js'
     try {
-      const path = Array.from(HUBOT_DEFAULT_ADAPTERS).indexOf(adapter) !== -1 ? `${this.adapterPath}/${adapter}` : `hubot-${adapter}`
-
-      this.adapter = require(path).use(this)
+      if (Array.from(HUBOT_DEFAULT_ADAPTERS).indexOf(this.adapterName) > -1) {
+        this.adapter = this.requireAdapterFrom(path.resolve(path.join(__dirname, 'adapters', this.adapterName)))
+      } else if (['.js', '.cjs', '.coffee'].includes(ext)) {
+        this.adapter = this.requireAdapterFrom(pathToFileURL(path.resolve(adapterPath)).pathname)
+      } else if (['.mjs'].includes(ext)) {
+        this.adapter = await this.importAdapterFrom(pathToFileURL(path.resolve(adapterPath)).href)
+      } else {
+        this.adapter = this.requireAdapterFrom(`hubot-${this.adapterName}`)
+      }
     } catch (err) {
-      this.logger.error(`Cannot load adapter ${adapter} - ${err}`)
+      this.logger.error(`Cannot load adapter ${adapterPath ?? '[no path set]'} ${this.adapterName} - ${err}`)
       process.exit(1)
     }
+  }
+
+  requireAdapterFrom (adapaterPath) {
+    return require(adapaterPath).use(this)
+  }
+
+  async importAdapterFrom (adapterPath) {
+    return await (await import(adapterPath)).default.use(this)
   }
 
   // Public: Help Commands for Running Scripts.
@@ -530,7 +538,7 @@ class Robot {
 
     const useStrictHeaderRegex = /^["']use strict['"];?\s+/
     const lines = body.replace(useStrictHeaderRegex, '').split(/(?:\n|\r\n|\r)/)
-      .reduce(toHeaderCommentBlock, {lines: [], isHeader: true}).lines
+      .reduce(toHeaderCommentBlock, { lines: [], isHeader: true }).lines
       .filter(Boolean) // remove empty lines
     let currentSection = null
     let nextSection
@@ -580,11 +588,11 @@ class Robot {
   // envelope - A Object with message, room and user details.
   // strings  - One or more Strings for each message to send.
   //
-  // Returns nothing.
+  // Returns whatever the extending adapter returns.
   send (envelope/* , ...strings */) {
     const strings = [].slice.call(arguments, 1)
 
-    this.adapter.send.apply(this.adapter, [envelope].concat(strings))
+    return this.adapter.send.apply(this.adapter, [envelope].concat(strings))
   }
 
   // Public: A helper reply function which delegates to the adapter's reply
@@ -593,11 +601,11 @@ class Robot {
   // envelope - A Object with message, room and user details.
   // strings  - One or more Strings for each message to send.
   //
-  // Returns nothing.
+  // Returns whatever the extending adapter returns.
   reply (envelope/* , ...strings */) {
     const strings = [].slice.call(arguments, 1)
 
-    this.adapter.reply.apply(this.adapter, [envelope].concat(strings))
+    return this.adapter.reply.apply(this.adapter, [envelope].concat(strings))
   }
 
   // Public: A helper send function to message a room that the robot is in.
@@ -605,12 +613,12 @@ class Robot {
   // room    - String designating the room to message.
   // strings - One or more Strings for each message to send.
   //
-  // Returns nothing.
+  // Returns whatever the extending adapter returns.
   messageRoom (room/* , ...strings */) {
     const strings = [].slice.call(arguments, 1)
     const envelope = { room }
 
-    this.adapter.send.apply(this.adapter, [envelope].concat(strings))
+    return this.adapter.send.apply(this.adapter, [envelope].concat(strings))
   }
 
   // Public: A wrapper around the EventEmitter API to make usage
