@@ -432,12 +432,6 @@ class Robot {
       res.setHeader('X-Powered-By', `hubot/${encodeURI(this.name)}`)
       return next()
     })
-
-    if (user && pass) {
-      const authUser = {}
-      authUser[user] = pass
-      app.use(basicAuth({ users: authUser }))
-    }
     app.use(express.query())
 
     app.use(express.json({ limit }))
@@ -450,9 +444,22 @@ class Robot {
       app.use(express.static(stat))
     }
 
+    const publicRouter = express.Router()
+    app.use('/', publicRouter)
+    const privateRouter = express.router()
+    app.use('/', privateRouter)
+
+    const hasAuth = user && pass
+    if (hasAuth) {
+      const authUser = {}
+      authUser[user] = pass
+      app.use(basicAuth({ users: authUser }))
+    }
+
     try {
       this.server = app.listen(port, address)
-      this.router = app
+      this.router = hasAuth ? privateRouter : publicRouter;
+      this.publicRouter = publicRouter;
     } catch (error) {
       const err = error
       this.logger.error(`Error trying to start HTTP server: ${err}\n${err.stack}`)
@@ -479,12 +486,14 @@ class Robot {
   setupNullRouter () {
     const msg = 'A script has tried registering a HTTP route while the HTTP server is disabled with --disabled-httpd.'
 
-    this.router = {
+    const nullRouter = {
       get: () => this.logger.warning(msg),
       post: () => this.logger.warning(msg),
       put: () => this.logger.warning(msg),
       delete: () => this.logger.warning(msg)
     }
+    this.router = nullRouter;
+    this.publicRouter = nullRouter;
   }
 
   // Load the adapter Hubot is going to use.
