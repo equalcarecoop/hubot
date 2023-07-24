@@ -446,7 +446,7 @@ class Robot {
 
     const publicRouter = express.Router()
     app.use('/', publicRouter)
-    const privateRouter = express.router()
+    const privateRouter = express.Router()
     app.use('/', privateRouter)
 
     const hasAuth = user && pass
