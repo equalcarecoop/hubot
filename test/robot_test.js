@@ -1,1153 +1,1022 @@
 'use strict'
 
-/* global describe, beforeEach, it, afterEach */
 /* eslint-disable no-unused-expressions */
-
-// Assertions and Stubbing
-const chai = require('chai')
-const sinon = require('sinon')
-chai.use(require('sinon-chai'))
-
-const expect = chai.expect
+require('coffeescript/register.js')
+const { describe, it, beforeEach, afterEach } = require('node:test')
+const assert = require('assert/strict')
 
 // Hubot classes
-const Robot = require('../src/robot')
-const CatchAllMessage = require('../src/message').CatchAllMessage
-const EnterMessage = require('../src/message').EnterMessage
-const LeaveMessage = require('../src/message').LeaveMessage
-const TextMessage = require('../src/message').TextMessage
-const TopicMessage = require('../src/message').TopicMessage
-
-// mock `hubot-mock-adapter` module from fixture
-const mockery = require('mockery')
+const Robot = require('../src/robot.js')
+const CatchAllMessage = require('../src/message.js').CatchAllMessage
+const EnterMessage = require('../src/message.js').EnterMessage
+const LeaveMessage = require('../src/message.js').LeaveMessage
+const TextMessage = require('../src/message.js').TextMessage
+const TopicMessage = require('../src/message.js').TopicMessage
+const User = require('../src/user.js')
 const path = require('path')
-
-describe('Robot', function () {
-  beforeEach(async function () {
-    mockery.enable({
-      warnOnReplace: false,
-      warnOnUnregistered: false
+const { hook, reset } = require('./fixtures/RequireMocker.js')
+const mockAdapter = require('./fixtures/mock-adapter.js')
+describe('Robot', () => {
+  describe('#http', () => {
+    let robot = null
+    beforeEach(() => {
+      robot = new Robot(null, false, 'TestHubot')
     })
-    mockery.registerMock('hubot-mock-adapter', require('./fixtures/mock-adapter.js'))
-    process.env.EXPRESS_PORT = 0
-    this.robot = new Robot('mock-adapter', true, 'TestHubot')
-    this.robot.alias = 'Hubot'
-    await this.robot.loadAdapter()
-    this.robot.run()
+    afterEach(() => {
+      robot.shutdown()
+    })
+    it('API', () => {
+      const agent = {}
+      const httpClient = robot.http('http://example.com', { agent })
+      assert.ok(httpClient.get)
+      assert.ok(httpClient.post)
+    })
+    it('passes options through to the ScopedHttpClient', () => {
+      const agent = {}
+      const httpClient = robot.http('http://example.com', { agent })
+      assert.deepEqual(httpClient.options.agent, agent)
+    })
+    it('sets a user agent', () => {
+      const httpClient = robot.http('http://example.com')
+      assert.ok(httpClient.options.headers['User-Agent'].indexOf('Hubot') > -1)
+    })
+    it('meges global http options', () => {
+      const agent = {}
+      robot.globalHttpOptions = { agent }
+      const httpClient = robot.http('http://localhost')
+      assert.deepEqual(httpClient.options.agent, agent)
+    })
+    it('local options override global http options', () => {
+      const agentA = {}
+      const agentB = {}
+      robot.globalHttpOptions = { agent: agentA }
+      const httpClient = robot.http('http://localhost', { agent: agentB })
+      assert.deepEqual(httpClient.options.agent, agentB)
+    })
+    it('builds the url correctly from a string', () => {
+      const httpClient = robot.http('http://localhost')
+      const options = httpClient.buildOptions('http://localhost:3001')
+      assert.equal(options.host, 'localhost:3001')
+      assert.equal(options.pathname, '/')
+      assert.equal(options.protocol, 'http:')
+      assert.equal(options.port, '3001')
+    })
+  })
 
-    // Re-throw AssertionErrors for clearer test failures
-    this.robot.on('error', function (name, err, response) {
-      if (err?.constructor.name === 'AssertionError' || name instanceof chai.AssertionError) {
-        process.nextTick(function () {
-          throw err
-        })
+  describe('#respondPattern', () => {
+    let robot = null
+    beforeEach(() => {
+      robot = new Robot('hubot-mock-adapter', false, 'TestHubot', 't-bot')
+    })
+    afterEach(() => {
+      robot.shutdown()
+    })
+    it('matches messages starting with robot\'s name', () => {
+      const testMessage = robot.name + 'message123'
+      const testRegex = /(.*)/
+
+      const pattern = robot.respondPattern(testRegex)
+      assert.match(testMessage, pattern)
+      const match = testMessage.match(pattern)[1]
+      assert.equal(match, 'message123')
+    })
+    it("matches messages starting with robot's alias", () => {
+      const testMessage = robot.alias + 'message123'
+      const testRegex = /(.*)/
+
+      const pattern = robot.respondPattern(testRegex)
+      assert.match(testMessage, pattern)
+      const match = testMessage.match(pattern)[1]
+      assert.equal(match, 'message123')
+    })
+
+    it('does not match unaddressed messages', () => {
+      const testMessage = 'message123'
+      const testRegex = /(.*)/
+
+      const pattern = robot.respondPattern(testRegex)
+      assert.doesNotMatch(testMessage, pattern)
+    })
+
+    it('matches properly when name is substring of alias', () => {
+      robot.name = 'Meg'
+      robot.alias = 'Megan'
+      const testMessage1 = robot.name + ' message123'
+      const testMessage2 = robot.alias + ' message123'
+      const testRegex = /(.*)/
+
+      const pattern = robot.respondPattern(testRegex)
+
+      assert.match(testMessage1, pattern)
+      const match1 = testMessage1.match(pattern)[1]
+      assert.equal(match1, 'message123')
+
+      assert.match(testMessage2, pattern)
+      const match2 = testMessage2.match(pattern)[1]
+      assert.equal(match2, 'message123')
+    })
+
+    it('matches properly when alias is substring of name', () => {
+      robot.name = 'Megan'
+      robot.alias = 'Meg'
+      const testMessage1 = robot.name + ' message123'
+      const testMessage2 = robot.alias + ' message123'
+      const testRegex = /(.*)/
+
+      const pattern = robot.respondPattern(testRegex)
+
+      assert.match(testMessage1, pattern)
+      const match1 = testMessage1.match(pattern)[1]
+      assert.equal(match1, 'message123')
+
+      assert.match(testMessage2, pattern)
+      const match2 = testMessage2.match(pattern)[1]
+      assert.equal(match2, 'message123')
+    })
+  })
+  describe('Listening API', () => {
+    let robot = null
+    beforeEach(() => {
+      robot = new Robot(null, false, 'TestHubot')
+    })
+    afterEach(() => {
+      robot.shutdown()
+    })
+    it('#listen: registers a new listener directly', () => {
+      assert.equal(robot.listeners.length, 0)
+      robot.listen(() => {}, () => {})
+      assert.equal(robot.listeners.length, 1)
+    })
+
+    it('#hear: registers a new listener directly', () => {
+      assert.equal(robot.listeners.length, 0)
+      robot.hear(/.*/, () => {})
+      assert.equal(robot.listeners.length, 1)
+    })
+
+    it('#respond: registers a new listener using respond', () => {
+      assert.equal(robot.listeners.length, 0)
+      robot.respond(/.*/, () => {})
+      assert.equal(robot.listeners.length, 1)
+    })
+
+    it('#enter: registers a new listener using listen', () => {
+      assert.equal(robot.listeners.length, 0)
+      robot.enter(() => {})
+      assert.equal(robot.listeners.length, 1)
+    })
+
+    it('#leave: registers a new listener using listen', () => {
+      assert.equal(robot.listeners.length, 0)
+      robot.leave(() => {})
+      assert.equal(robot.listeners.length, 1)
+    })
+    it('#topic: registers a new listener using listen', () => {
+      assert.equal(robot.listeners.length, 0)
+      robot.topic(() => {})
+      assert.equal(robot.listeners.length, 1)
+    })
+
+    it('#catchAll: registers a new listener using listen', () => {
+      assert.equal(robot.listeners.length, 0)
+      robot.catchAll(() => {})
+      assert.equal(robot.listeners.length, 1)
+    })
+  })
+  describe('#receive', () => {
+    let robot = null
+    let user = null
+    beforeEach(() => {
+      robot = new Robot('hubot-mock-adapter', false, 'TestHubot')
+      user = new User('1', { name: 'node', room: '#test' })
+    })
+    afterEach(() => {
+      robot.shutdown()
+    })
+    it('calls all registered listeners', async () => {
+      // Need to use a real Message so that the CatchAllMessage constructor works
+      const testMessage = new TextMessage(user, 'message123')
+      let counter = 0
+      const listener = async message => {
+        counter++
       }
+      robot.listen(() => true, null, listener)
+      robot.listen(() => true, null, listener)
+      robot.listen(() => true, null, listener)
+      robot.listen(() => true, null, listener)
+      await robot.receive(testMessage)
+      assert.equal(counter, 4)
     })
 
-    this.user = this.robot.brain.userForId('1', {
-      name: 'hubottester',
-      room: '#mocha'
+    it('sends a CatchAllMessage if no listener matches', async () => {
+      const testMessage = new TextMessage(user, 'message123')
+      robot.listeners = []
+      robot.catchAll(async (message) => {
+        assert.ok(message instanceof CatchAllMessage)
+        assert.deepEqual(message.message, testMessage)
+      })
+      await robot.receive(testMessage)
+    })
+
+    it('does not trigger a CatchAllMessage if a listener matches', async () => {
+      const testMessage = new TextMessage(user, 'message123')
+
+      const matchingListener = async response => {
+        assert.deepEqual(response.message, testMessage)
+      }
+
+      robot.listen(() => true, null, matchingListener)
+      robot.catchAll(null, () => {
+        throw new Error('Should not have triggered catchAll')
+      })
+      await robot.receive(testMessage)
+    })
+
+    it('stops processing if a listener marks the message as done', async () => {
+      const testMessage = new TextMessage(user, 'message123')
+
+      const matchingListener = async response => {
+        response.message.done = true
+        assert.deepEqual(response.message, testMessage)
+      }
+      const listenerSpy = async message => {
+        assert.fail('Should not have triggered listener')
+      }
+      robot.listen(() => true, null, matchingListener)
+      robot.listen(() => true, null, listenerSpy)
+      await robot.receive(testMessage)
+    })
+
+    it('gracefully handles listener uncaughtExceptions (move on to next listener)', async () => {
+      const testMessage = {}
+      const theError = new Error('Expected error')
+
+      const badListener = async () => {
+        throw theError
+      }
+
+      let goodListenerCalled = false
+      const goodListener = async message => {
+        goodListenerCalled = true
+      }
+
+      robot.listen(() => true, null, badListener)
+      robot.listen(() => true, null, goodListener)
+      robot.on('error', (err, response) => {
+        assert.deepEqual(err, theError)
+        assert.deepEqual(response.message, testMessage)
+      })
+      await robot.receive(testMessage)
+      assert.ok(goodListenerCalled)
     })
   })
+  describe('#loadFile', () => {
+    let robot = null
+    beforeEach(() => {
+      robot = new Robot('hubot-mock-adapter', false, 'TestHubot')
+    })
+    afterEach(() => {
+      robot.shutdown()
+      process.removeAllListeners()
+    })
+    it('should require the specified file', async () => {
+      await robot.loadFile(path.resolve('./test/fixtures'), 'TestScript.js')
+      assert.deepEqual(robot.hasLoadedTestJsScript, true)
+    })
 
-  afterEach(function () {
-    mockery.disable()
-    this.robot.shutdown()
-  })
+    it('should load an .mjs file', async () => {
+      await robot.loadFile(path.resolve('./test/fixtures'), 'TestScript.mjs')
+      assert.deepEqual(robot.hasLoadedTestMjsScript, true)
+    })
 
-  describe('Unit Tests', function () {
-    describe('#http', function () {
-      beforeEach(function () {
-        const url = 'http://localhost'
-        this.httpClient = this.robot.http(url)
-      })
-
-      it('creates a new ScopedHttpClient', function () {
-        // 'instanceOf' check doesn't work here due to the design of
-        // ScopedHttpClient
-        expect(this.httpClient).to.have.property('get')
-        expect(this.httpClient).to.have.property('post')
-      })
-
-      it('passes options through to the ScopedHttpClient', function () {
-        const agent = {}
-        const httpClient = this.robot.http('http://localhost', { agent })
-        expect(httpClient.options.agent).to.equal(agent)
-      })
-
-      it('sets a sane user agent', function () {
-        expect(this.httpClient.options.headers['User-Agent']).to.contain('Hubot')
-      })
-
-      it('merges in any global http options', function () {
-        const agent = {}
-        this.robot.globalHttpOptions = { agent }
-        const httpClient = this.robot.http('http://localhost')
-        expect(httpClient.options.agent).to.equal(agent)
-      })
-
-      it('local options override global http options', function () {
-        const agentA = {}
-        const agentB = {}
-        this.robot.globalHttpOptions = { agent: agentA }
-        const httpClient = this.robot.http('http://localhost', { agent: agentB })
-        expect(httpClient.options.agent).to.equal(agentB)
-      })
-
-      it('builds the url correctly from a string', function () {
-        const options = this.httpClient.buildOptions('http://localhost:3001')
-        expect(options.host).to.equal('localhost:3001')
-        expect(options.pathname).to.equal('/')
-        expect(options.protocol).to.equal('http:')
-        expect(options.port).to.equal('3001')
+    describe('proper script', () => {
+      it('should parse the script documentation', async () => {
+        await robot.loadFile(path.resolve('./test/fixtures'), 'TestScript.js')
+        assert.deepEqual(robot.helpCommands(), ['hubot test - Responds with a test response'])
       })
     })
 
-    describe('#respondPattern', function () {
-      it('matches messages starting with robot\'s name', function () {
-        const testMessage = this.robot.name + 'message123'
-        const testRegex = /(.*)/
-
-        const pattern = this.robot.respondPattern(testRegex)
-        expect(testMessage).to.match(pattern)
-        const match = testMessage.match(pattern)[1]
-        expect(match).to.equal('message123')
-      })
-
-      it('matches messages starting with robot\'s alias', function () {
-        const testMessage = this.robot.alias + 'message123'
-        const testRegex = /(.*)/
-
-        const pattern = this.robot.respondPattern(testRegex)
-        expect(testMessage).to.match(pattern)
-        const match = testMessage.match(pattern)[1]
-        expect(match).to.equal('message123')
-      })
-
-      it('does not match unaddressed messages', function () {
-        const testMessage = 'message123'
-        const testRegex = /(.*)/
-
-        const pattern = this.robot.respondPattern(testRegex)
-        expect(testMessage).to.not.match(pattern)
-      })
-
-      it('matches properly when name is substring of alias', function () {
-        this.robot.name = 'Meg'
-        this.robot.alias = 'Megan'
-        const testMessage1 = this.robot.name + ' message123'
-        const testMessage2 = this.robot.alias + ' message123'
-        const testRegex = /(.*)/
-
-        const pattern = this.robot.respondPattern(testRegex)
-
-        expect(testMessage1).to.match(pattern)
-        const match1 = testMessage1.match(pattern)[1]
-        expect(match1).to.equal('message123')
-
-        expect(testMessage2).to.match(pattern)
-        const match2 = testMessage2.match(pattern)[1]
-        expect(match2).to.equal('message123')
-      })
-
-      it('matches properly when alias is substring of name', function () {
-        this.robot.name = 'Megan'
-        this.robot.alias = 'Meg'
-        const testMessage1 = this.robot.name + ' message123'
-        const testMessage2 = this.robot.alias + ' message123'
-        const testRegex = /(.*)/
-
-        const pattern = this.robot.respondPattern(testRegex)
-
-        expect(testMessage1).to.match(pattern)
-        const match1 = testMessage1.match(pattern)[1]
-        expect(match1).to.equal('message123')
-
-        expect(testMessage2).to.match(pattern)
-        const match2 = testMessage2.match(pattern)[1]
-        expect(match2).to.equal('message123')
-      })
-    })
-
-    describe('#listen', () =>
-      it('registers a new listener directly', function () {
-        expect(this.robot.listeners).to.have.length(0)
-        this.robot.listen(function () {}, function () {})
-        expect(this.robot.listeners).to.have.length(1)
-      })
-    )
-
-    describe('#hear', () =>
-      it('registers a new listener directly', function () {
-        expect(this.robot.listeners).to.have.length(0)
-        this.robot.hear(/.*/, function () {})
-        expect(this.robot.listeners).to.have.length(1)
-      })
-    )
-
-    describe('#respond', () =>
-      it('registers a new listener using hear', function () {
-        sinon.spy(this.robot, 'hear')
-        this.robot.respond(/.*/, function () {})
-        expect(this.robot.hear).to.have.been.called
-      })
-    )
-
-    describe('#enter', () =>
-      it('registers a new listener using listen', function () {
-        sinon.spy(this.robot, 'listen')
-        this.robot.enter(function () {})
-        expect(this.robot.listen).to.have.been.called
-      })
-    )
-
-    describe('#leave', () =>
-      it('registers a new listener using listen', function () {
-        sinon.spy(this.robot, 'listen')
-        this.robot.leave(function () {})
-        expect(this.robot.listen).to.have.been.called
-      })
-    )
-
-    describe('#topic', () =>
-      it('registers a new listener using listen', function () {
-        sinon.spy(this.robot, 'listen')
-        this.robot.topic(function () {})
-        expect(this.robot.listen).to.have.been.called
-      })
-    )
-
-    describe('#catchAll', () =>
-      it('registers a new listener using listen', function () {
-        sinon.spy(this.robot, 'listen')
-        this.robot.catchAll(function () {})
-        expect(this.robot.listen).to.have.been.called
-      })
-    )
-
-    describe('#receive', function () {
-      it('calls all registered listeners', function (done) {
-        // Need to use a real Message so that the CatchAllMessage constructor works
-        const testMessage = new TextMessage(this.user, 'message123')
-
-        const listener = {
-          call (response, middleware, cb) {
-            cb()
-          }
+    describe('non-Function script', () => {
+      it('logs a warning for a .js file that does not export the correct API', async () => {
+        let wasCalled = false
+        robot.logger.warning = (...args) => {
+          wasCalled = true
+          assert.ok(args)
         }
-        sinon.spy(listener, 'call')
-
-        this.robot.listeners = [
-          listener,
-          listener,
-          listener,
-          listener
-        ]
-
-        this.robot.receive(testMessage, function () {
-          // When no listeners match, each listener is called twice: once with
-          // the original message and once with a CatchAll message
-          expect(listener.call).to.have.callCount(8)
-          done()
-        })
+        await robot.loadFile(path.resolve('./test/fixtures'), 'TestScriptIncorrectApi.js')
+        assert.deepEqual(wasCalled, true)
       })
 
-      it('sends a CatchAllMessage if no listener matches', function (done) {
-        // Testing for recursion with a new CatchAllMessage that wraps the
-        // original message
-
-        const testMessage = new TextMessage(this.user, 'message123')
-        this.robot.listeners = []
-
-        // Replace @robot.receive so we can catch when the functions recurses
-        const oldReceive = this.robot.receive
-        this.robot.receive = function (message, cb) {
-          expect(message).to.be.instanceof(CatchAllMessage)
-          expect(message.message).to.be.equal(testMessage)
-          cb()
+      it('logs a warning for a .mjs file that does not export the correct API', async () => {
+        let wasCalled = false
+        robot.logger.warning = (...args) => {
+          wasCalled = true
+          assert.ok(args)
         }
-        sinon.spy(this.robot, 'receive')
-
-        // Call the original receive method that we want to test
-        oldReceive.call(this.robot, testMessage, () => {
-          expect(this.robot.receive).to.have.been.called
-          done()
-        })
-      })
-
-      it('does not trigger a CatchAllMessage if a listener matches', function (done) {
-        const testMessage = new TextMessage(this.user, 'message123')
-
-        const matchingListener = {
-          call (message, middleware, doesMatch) {
-            // indicate that the message matched the listener
-            doesMatch(true)
-          }
-        }
-
-        // Replace @robot.receive so we can catch if the functions recurses
-        const oldReceive = this.robot.receive
-        this.robot.receive = sinon.spy()
-
-        this.robot.listeners = [
-          matchingListener
-        ]
-
-        // Call the original receive method that we want to test
-        oldReceive.call(this.robot, testMessage, done)
-
-        // Ensure the function did not recurse
-        expect(this.robot.receive).to.not.have.been.called
-      })
-
-      it('stops processing if a listener marks the message as done', function (done) {
-        const testMessage = new TextMessage(this.user, 'message123')
-
-        const matchingListener = {
-          call (message, middleware, doesMatch) {
-            message.done = true
-            // Listener must have matched
-            doesMatch(true)
-          }
-        }
-
-        const listenerSpy =
-          { call: sinon.spy() }
-
-        this.robot.listeners = [
-          matchingListener,
-          listenerSpy
-        ]
-
-        this.robot.receive(testMessage, function () {
-          expect(listenerSpy.call).to.not.have.been.called
-          done()
-        })
-      })
-
-      it('gracefully handles listener uncaughtExceptions (move on to next listener)', function (done) {
-        const testMessage = {}
-        const theError = new Error()
-
-        const badListener = {
-          call () {
-            throw theError
-          }
-        }
-
-        let goodListenerCalled = false
-        const goodListener = {
-          call (_, middleware, doesMatch) {
-            goodListenerCalled = true
-            doesMatch(true)
-          }
-        }
-
-        this.robot.listeners = [
-          badListener,
-          goodListener
-        ]
-
-        this.robot.emit = function (name, err, response) {
-          expect(name).to.equal('error')
-          expect(err).to.equal(theError)
-          expect(response.message).to.equal(testMessage)
-        }
-        sinon.spy(this.robot, 'emit')
-
-        this.robot.receive(testMessage, () => {
-          expect(this.robot.emit).to.have.been.called
-          expect(goodListenerCalled).to.be.ok
-          done()
-        })
-      })
-
-      it('executes the callback after the function returns when there are no listeners', function (done) {
-        const testMessage = new TextMessage(this.user, 'message123')
-        let finished = false
-        this.robot.receive(testMessage, function () {
-          expect(finished).to.be.ok
-          done()
-        })
-        finished = true
+        await robot.loadFile(path.resolve('./test/fixtures'), 'TestScriptIncorrectApi.mjs')
+        assert.deepEqual(wasCalled, true)
       })
     })
 
-    describe('#loadFile', function () {
-      beforeEach(function () {
-        this.sandbox = sinon.createSandbox()
-      })
-
-      afterEach(function () {
-        this.sandbox.restore()
-      })
-
-      it('should require the specified file', function () {
-        const module = require('module')
-
-        const script = sinon.spy(function (robot) {})
-        this.sandbox.stub(module, '_load').returns(script)
-        this.sandbox.stub(this.robot, 'parseHelp')
-
-        this.robot.loadFile('./scripts', 'TestScript.js')
-        expect(module._load).to.have.been.calledWith(path.join('scripts', 'TestScript'))
-      })
-
-      describe('proper script', function () {
-        beforeEach(function () {
-          const module = require('module')
-
-          this.script = sinon.spy(function (robot) {})
-          this.sandbox.stub(module, '_load').returns(this.script)
-          this.sandbox.stub(this.robot, 'parseHelp')
-        })
-
-        it('should call the script with the Robot', function () {
-          this.robot.loadFile('./scripts', 'TestScript.js')
-          expect(this.script).to.have.been.calledWith(this.robot)
-        })
-
-        it('should parse the script documentation', function () {
-          this.robot.loadFile('./scripts', 'TestScript.js')
-          expect(this.robot.parseHelp).to.have.been.calledWith(path.join('scripts', 'TestScript.js'))
-        })
-      })
-
-      describe('non-Function script', function () {
-        beforeEach(function () {
-          const module = require('module')
-
-          this.script = {}
-          this.sandbox.stub(module, '_load').returns(this.script)
-          this.sandbox.stub(this.robot, 'parseHelp')
-        })
-
-        it('logs a warning for a .js file', function () {
-          sinon.stub(this.robot.logger, 'warning')
-          this.robot.loadFile('./scripts', 'TestScript.js')
-          expect(this.robot.logger.warning).to.have.been.called
-        })
-
-        it('logs a warning for a .mjs file', function () {
-          sinon.stub(this.robot.logger, 'warning')
-          this.robot.loadFile('./scripts', 'TestScript.mjs')
-          expect(this.robot.logger.warning).to.have.been.called
-        })
-      })
-
-      describe('unsupported file extension', function () {
-        beforeEach(function () {
-          const module = require('module')
-
-          this.script = sinon.spy(function (robot) {})
-          this.sandbox.stub(module, '_load').returns(this.script)
-          this.sandbox.stub(this.robot, 'parseHelp')
-        })
-
-        it('should not be loaded by the Robot', function () {
-          this.robot.loadFile('./scripts', 'unsupported.yml')
-          expect(this.script).to.not.have.been.calledWith(this.robot)
-        })
-      })
-    })
-
-    describe('#send', function () {
-      beforeEach(function () {
-        sinon.spy(this.robot.adapter, 'send')
-      })
-
-      it('delegates to adapter "send" with proper context', function () {
-        this.robot.send({}, 'test message')
-        expect(this.robot.adapter.send).to.have.been.calledOn(this.robot.adapter)
-      })
-    })
-
-    describe('#reply', function () {
-      beforeEach(function () {
-        sinon.spy(this.robot.adapter, 'reply')
-      })
-
-      it('delegates to adapter "reply" with proper context', function () {
-        this.robot.reply({}, 'test message')
-        expect(this.robot.adapter.reply).to.have.been.calledOn(this.robot.adapter)
-      })
-    })
-
-    describe('#messageRoom', function () {
-      beforeEach(function () {
-        sinon.spy(this.robot.adapter, 'send')
-      })
-
-      it('delegates to adapter "send" with proper context', function () {
-        this.robot.messageRoom('testRoom', 'messageRoom test')
-        expect(this.robot.adapter.send).to.have.been.calledOn(this.robot.adapter)
-      })
-    })
-
-    describe('#on', function () {
-      beforeEach(function () {
-        sinon.spy(this.robot.events, 'on')
-      })
-
-      it('delegates to events "on" with proper context', function () {
-        this.robot.on('event', function () {})
-        expect(this.robot.events.on).to.have.been.calledOn(this.robot.events)
-      })
-    })
-
-    describe('#emit', function () {
-      beforeEach(function () {
-        sinon.spy(this.robot.events, 'emit')
-      })
-
-      it('delegates to events "emit" with proper context', function () {
-        this.robot.emit('event', function () {})
-        expect(this.robot.events.emit).to.have.been.calledOn(this.robot.events)
+    describe('unsupported file extension', () => {
+      it('should not be loaded by the Robot', async () => {
+        let wasCalled = false
+        robot.logger.debug = (...args) => {
+          wasCalled = true
+          assert.match(args[0], /unsupported file type/)
+        }
+        await robot.loadFile(path.resolve('./test/fixtures'), 'unsupported.yml')
+        assert.deepEqual(wasCalled, true)
       })
     })
   })
 
-  describe('Listener Registration', function () {
-    describe('#listen', () =>
-      it('forwards the matcher, options, and callback to Listener', function () {
-        const callback = sinon.spy()
-        const matcher = sinon.spy()
-        const options = {}
-
-        this.robot.listen(matcher, options, callback)
-        const testListener = this.robot.listeners[0]
-
-        expect(testListener.matcher).to.equal(matcher)
-        expect(testListener.callback).to.equal(callback)
-        expect(testListener.options).to.equal(options)
-      })
-    )
-
-    describe('#hear', function () {
-      it('matches TextMessages', function () {
-        const callback = sinon.spy()
-        const testMessage = new TextMessage(this.user, 'message123')
-        const testRegex = /^message123$/
-
-        this.robot.hear(testRegex, callback)
-        const testListener = this.robot.listeners[0]
-        const result = testListener.matcher(testMessage)
-
-        expect(result).to.be.ok
-      })
-
-      it('does not match EnterMessages', function () {
-        const callback = sinon.spy()
-        const testMessage = new EnterMessage(this.user)
-        const testRegex = /.*/
-
-        this.robot.hear(testRegex, callback)
-        const testListener = this.robot.listeners[0]
-        const result = testListener.matcher(testMessage)
-
-        expect(result).to.not.be.ok
-      })
+  describe('Sending API', () => {
+    let robot = null
+    beforeEach(async () => {
+      hook('hubot-mock-adapter', mockAdapter)
+      robot = new Robot('hubot-mock-adapter', false, 'TestHubot')
+      await robot.loadAdapter()
+      await robot.run()
+    })
+    afterEach(() => {
+      robot.shutdown()
+      reset()
     })
 
-    describe('#respond', function () {
-      it('matches TextMessages addressed to the robot', function () {
-        const callback = sinon.spy()
-        const testMessage = new TextMessage(this.user, 'TestHubot message123')
-        const testRegex = /message123$/
-
-        this.robot.respond(testRegex, callback)
-        const testListener = this.robot.listeners[0]
-        const result = testListener.matcher(testMessage)
-
-        expect(result).to.be.ok
-      })
-
-      it('does not match EnterMessages', function () {
-        const callback = sinon.spy()
-        const testMessage = new EnterMessage(this.user)
-        const testRegex = /.*/
-
-        this.robot.respond(testRegex, callback)
-        const testListener = this.robot.listeners[0]
-        const result = testListener.matcher(testMessage)
-
-        expect(result).to.not.be.ok
-      })
+    it('#send: delegates to adapter "send" with proper context', async () => {
+      let wasCalled = false
+      robot.adapter.send = async (envelop, ...strings) => {
+        wasCalled = true
+        assert.deepEqual(strings, ['test message'], 'The strings should be passed through.')
+      }
+      await robot.send({}, 'test message')
+      assert.deepEqual(wasCalled, true)
     })
 
-    describe('#enter', function () {
-      it('matches EnterMessages', function () {
-        const callback = sinon.spy()
-        const testMessage = new EnterMessage(this.user)
-
-        this.robot.enter(callback)
-        const testListener = this.robot.listeners[0]
-        const result = testListener.matcher(testMessage)
-
-        expect(result).to.be.ok
-      })
-
-      it('does not match TextMessages', function () {
-        const callback = sinon.spy()
-        const testMessage = new TextMessage(this.user, 'message123')
-
-        this.robot.enter(callback)
-        const testListener = this.robot.listeners[0]
-        const result = testListener.matcher(testMessage)
-
-        expect(result).to.not.be.ok
-      })
+    it('#reply: delegates to adapter "reply" with proper context', async () => {
+      let wasCalled = false
+      robot.adapter.reply = async (envelop, ...strings) => {
+        assert.deepEqual(strings, ['test message'], 'The strings should be passed through.')
+        wasCalled = true
+      }
+      await robot.reply({}, 'test message')
+      assert.deepEqual(wasCalled, true)
     })
 
-    describe('#leave', function () {
-      it('matches LeaveMessages', function () {
-        const callback = sinon.spy()
-        const testMessage = new LeaveMessage(this.user)
-
-        this.robot.leave(callback)
-        const testListener = this.robot.listeners[0]
-        const result = testListener.matcher(testMessage)
-
-        expect(result).to.be.ok
-      })
-
-      it('does not match TextMessages', function () {
-        const callback = sinon.spy()
-        const testMessage = new TextMessage(this.user, 'message123')
-
-        this.robot.leave(callback)
-        const testListener = this.robot.listeners[0]
-        const result = testListener.matcher(testMessage)
-
-        expect(result).to.not.be.ok
-      })
-    })
-
-    describe('#topic', function () {
-      it('matches TopicMessages', function () {
-        const callback = sinon.spy()
-        const testMessage = new TopicMessage(this.user)
-
-        this.robot.topic(callback)
-        const testListener = this.robot.listeners[0]
-        const result = testListener.matcher(testMessage)
-
-        expect(result).to.be.ok
-      })
-
-      it('does not match TextMessages', function () {
-        const callback = sinon.spy()
-        const testMessage = new TextMessage(this.user, 'message123')
-
-        this.robot.topic(callback)
-        const testListener = this.robot.listeners[0]
-        const result = testListener.matcher(testMessage)
-
-        expect(result).to.not.be.ok
-      })
-    })
-
-    describe('#catchAll', function () {
-      it('matches CatchAllMessages', function () {
-        const callback = sinon.spy()
-        const testMessage = new CatchAllMessage(new TextMessage(this.user, 'message123'))
-
-        this.robot.catchAll(callback)
-        const testListener = this.robot.listeners[0]
-        const result = testListener.matcher(testMessage)
-
-        expect(result).to.be.ok
-      })
-
-      it('does not match TextMessages', function () {
-        const callback = sinon.spy()
-        const testMessage = new TextMessage(this.user, 'message123')
-
-        this.robot.catchAll(callback)
-        const testListener = this.robot.listeners[0]
-        const result = testListener.matcher(testMessage)
-
-        expect(result).to.not.be.ok
-      })
+    it('#messageRoom: delegates to adapter "send" with proper context', async () => {
+      let wasCalled = false
+      robot.adapter.send = async (envelop, ...strings) => {
+        assert.equal(envelop.room, 'testRoom', 'The room should be passed through.')
+        assert.deepEqual(strings, ['messageRoom test'], 'The strings should be passed through.')
+        wasCalled = true
+      }
+      await robot.messageRoom('testRoom', 'messageRoom test')
+      assert.deepEqual(wasCalled, true)
     })
   })
+  describe('Listener Registration', () => {
+    let robot = null
+    let user = null
+    beforeEach(() => {
+      robot = new Robot('hubot-mock-adapter', false, 'TestHubot')
+      user = new User('1', { name: 'node', room: '#test' })
+    })
+    afterEach(() => {
+      robot.shutdown()
+    })
+    it('#listen: forwards the matcher, options, and callback to Listener', () => {
+      const callback = async () => {}
+      const matcher = () => {}
+      const options = {}
 
-  describe('Message Processing', function () {
-    it('calls a matching listener', function (done) {
-      const testMessage = new TextMessage(this.user, 'message123')
-      this.robot.hear(/^message123$/, function (response) {
-        expect(response.message).to.equal(testMessage)
-        done()
-      })
-      this.robot.receive(testMessage)
+      robot.listen(matcher, options, callback)
+      const testListener = robot.listeners[0]
+
+      assert.deepEqual(testListener.matcher, matcher)
+      assert.deepEqual(testListener.callback, callback)
+      assert.deepEqual(testListener.options, options)
     })
 
-    it('calls multiple matching listeners', function (done) {
-      const testMessage = new TextMessage(this.user, 'message123')
+    it('#hear: matches TextMessages', () => {
+      const callback = async () => {}
+      const testMessage = new TextMessage(user, 'message123')
+      const testRegex = /^message123$/
+
+      robot.hear(testRegex, callback)
+      const testListener = robot.listeners[0]
+      const result = testListener.matcher(testMessage)
+
+      assert.ok(result)
+    })
+
+    it('does not match EnterMessages', () => {
+      const callback = async () => {}
+      const testMessage = new EnterMessage(user)
+      const testRegex = /.*/
+
+      robot.hear(testRegex, callback)
+      const testListener = robot.listeners[0]
+      const result = testListener.matcher(testMessage)
+
+      assert.deepEqual(result, undefined)
+    })
+
+    it('#respond: matches TextMessages addressed to the robot', () => {
+      const callback = async () => {}
+      const testMessage = new TextMessage(user, 'TestHubot message123')
+      const testRegex = /message123$/
+
+      robot.respond(testRegex, callback)
+      const testListener = robot.listeners[0]
+      const result = testListener.matcher(testMessage)
+
+      assert.ok(result)
+    })
+
+    it('does not match EnterMessages', () => {
+      const callback = async () => {}
+      const testMessage = new EnterMessage(user)
+      const testRegex = /.*/
+
+      robot.respond(testRegex, callback)
+      const testListener = robot.listeners[0]
+      const result = testListener.matcher(testMessage)
+
+      assert.deepEqual(result, undefined)
+    })
+    it('#enter: matches EnterMessages', () => {
+      const callback = async () => {}
+      const testMessage = new EnterMessage(user)
+
+      robot.enter(callback)
+      const testListener = robot.listeners[0]
+      const result = testListener.matcher(testMessage)
+
+      assert.ok(result)
+    })
+
+    it('does not match TextMessages', () => {
+      const callback = async () => {}
+      const testMessage = new TextMessage(user, 'message123')
+
+      robot.enter(callback)
+      const testListener = robot.listeners[0]
+      const result = testListener.matcher(testMessage)
+
+      assert.deepEqual(result, false)
+    })
+
+    it('#leave: matches LeaveMessages', () => {
+      const callback = async () => {}
+      const testMessage = new LeaveMessage(user)
+
+      robot.leave(callback)
+      const testListener = robot.listeners[0]
+      const result = testListener.matcher(testMessage)
+
+      assert.ok(result)
+    })
+
+    it('does not match TextMessages', () => {
+      const callback = async () => {}
+      const testMessage = new TextMessage(user, 'message123')
+
+      robot.leave(callback)
+      const testListener = robot.listeners[0]
+      const result = testListener.matcher(testMessage)
+
+      assert.deepEqual(result, false)
+    })
+    it('#topic: matches TopicMessages', () => {
+      const callback = async () => {}
+      const testMessage = new TopicMessage(user)
+
+      robot.topic(callback)
+      const testListener = robot.listeners[0]
+      const result = testListener.matcher(testMessage)
+
+      assert.deepEqual(result, true)
+    })
+
+    it('does not match TextMessages', () => {
+      const callback = async () => {}
+      const testMessage = new TextMessage(user, 'message123')
+
+      robot.topic(callback)
+      const testListener = robot.listeners[0]
+      const result = testListener.matcher(testMessage)
+
+      assert.deepEqual(result, false)
+    })
+
+    it('#catchAll: matches CatchAllMessages', () => {
+      const callback = async () => {}
+      const testMessage = new CatchAllMessage(new TextMessage(user, 'message123'))
+
+      robot.catchAll(callback)
+      const testListener = robot.listeners[0]
+      const result = testListener.matcher(testMessage)
+
+      assert.deepEqual(result, true)
+    })
+
+    it('does not match TextMessages', () => {
+      const callback = async () => {}
+      const testMessage = new TextMessage(user, 'message123')
+
+      robot.catchAll(callback)
+      const testListener = robot.listeners[0]
+      const result = testListener.matcher(testMessage)
+
+      assert.deepEqual(result, false)
+    })
+  })
+  describe('Message Processing', () => {
+    let robot = null
+    let user = null
+    beforeEach(() => {
+      robot = new Robot('hubot-mock-adapter', false, 'TestHubot')
+      user = new User('1', { name: 'node', room: '#test' })
+    })
+    afterEach(() => {
+      robot.shutdown()
+    })
+    it('calls a matching listener', async () => {
+      const testMessage = new TextMessage(user, 'message123')
+      robot.hear(/^message123$/, async response => {
+        assert.deepEqual(response.message, testMessage)
+      })
+      await robot.receive(testMessage)
+    })
+
+    it('calls multiple matching listeners', async () => {
+      const testMessage = new TextMessage(user, 'message123')
 
       let listenersCalled = 0
-      const listenerCallback = function (response) {
-        expect(response.message).to.equal(testMessage)
+      const listenerCallback = async response => {
+        assert.deepEqual(response.message, testMessage)
         listenersCalled++
       }
 
-      this.robot.hear(/^message123$/, listenerCallback)
-      this.robot.hear(/^message123$/, listenerCallback)
+      robot.hear(/^message123$/, listenerCallback)
+      robot.hear(/^message123$/, listenerCallback)
 
-      this.robot.receive(testMessage, function () {
-        expect(listenersCalled).to.equal(2)
-        done()
-      })
+      await robot.receive(testMessage)
+      assert.equal(listenersCalled, 2)
     })
 
-    it('calls the catch-all listener if no listeners match', function (done) {
-      const testMessage = new TextMessage(this.user, 'message123')
+    it('calls the catch-all listener if no listeners match', async () => {
+      const testMessage = new TextMessage(user, 'message123')
 
-      const listenerCallback = sinon.spy()
-      this.robot.hear(/^no-matches$/, listenerCallback)
+      const listenerCallback = async () => {
+        assert.fail('Should not have called listener')
+      }
+      robot.hear(/^no-matches$/, listenerCallback)
 
-      this.robot.catchAll(function (response) {
-        expect(listenerCallback).to.not.have.been.called
-        expect(response.message).to.equal(testMessage)
-        done()
+      robot.catchAll(async response => {
+        assert.deepEqual(response.message, testMessage)
       })
 
-      this.robot.receive(testMessage)
+      await robot.receive(testMessage)
     })
 
-    it('does not call the catch-all listener if any listener matched', function (done) {
-      const testMessage = new TextMessage(this.user, 'message123')
+    it('does not call the catch-all listener if any listener matched', async () => {
+      const testMessage = new TextMessage(user, 'message123')
+      let counter = 0
+      const listenerCallback = async () => {
+        counter++
+      }
+      robot.hear(/^message123$/, listenerCallback)
 
-      const listenerCallback = sinon.spy()
-      this.robot.hear(/^message123$/, listenerCallback)
+      const catchAllCallback = async () => {
+        assert.fail('Should not have been called')
+      }
+      robot.catchAll(catchAllCallback)
 
-      const catchAllCallback = sinon.spy()
-      this.robot.catchAll(catchAllCallback)
+      await robot.receive(testMessage)
+      assert.equal(counter, 1)
+    })
 
-      this.robot.receive(testMessage, function () {
-        expect(listenerCallback).to.have.been.calledOnce
-        expect(catchAllCallback).to.not.have.been.called
-        done()
+    it('stops processing if message.finish() is called synchronously', async () => {
+      const testMessage = new TextMessage(user, 'message123')
+
+      robot.hear(/^message123$/, async response => response.message.finish())
+      let wasCalled = false
+      const listenerCallback = async () => {
+        wasCalled = true
+        assert.fail('Should not have been called')
+      }
+      robot.hear(/^message123$/, listenerCallback)
+
+      await robot.receive(testMessage)
+      assert.equal(wasCalled, false)
+    })
+
+    it('calls non-TextListener objects', async () => {
+      const testMessage = new EnterMessage(user)
+
+      robot.enter(async response => {
+        assert.deepEqual(response.message, testMessage)
       })
+
+      await robot.receive(testMessage)
     })
 
-    it('stops processing if message.finish() is called synchronously', function (done) {
-      const testMessage = new TextMessage(this.user, 'message123')
+    it('gracefully handles hearer uncaughtExceptions (move on to next hearer)', async () => {
+      const testMessage = new TextMessage(user, 'message123')
+      const theError = new Error('Expected error to be thrown')
 
-      this.robot.hear(/^message123$/, response => response.message.finish())
-
-      const listenerCallback = sinon.spy()
-      this.robot.hear(/^message123$/, listenerCallback)
-
-      this.robot.receive(testMessage, function () {
-        expect(listenerCallback).to.not.have.been.called
-        done()
-      })
-    })
-
-    it('calls non-TextListener objects', function (done) {
-      const testMessage = new EnterMessage(this.user)
-
-      this.robot.enter(function (response) {
-        expect(response.message).to.equal(testMessage)
-        done()
-      })
-
-      this.robot.receive(testMessage)
-    })
-
-    it('gracefully handles listener uncaughtExceptions (move on to next listener)', function (done) {
-      const testMessage = new TextMessage(this.user, 'message123')
-      const theError = new Error()
-
-      this.robot.hear(/^message123$/, function () {
+      robot.hear(/^message123$/, async () => {
         throw theError
       })
 
       let goodListenerCalled = false
-      this.robot.hear(/^message123$/, () => {
+      robot.hear(/^message123$/, async response => {
         goodListenerCalled = true
       })
+      robot.on('error', (err, response) => {
+        assert.deepEqual(err, theError)
+        assert.deepEqual(response.message, testMessage)
+      })
 
-      this.robot.emit = function (name, err, response) {
-        expect(name).to.equal('error')
-        expect(err).to.equal(theError)
-        expect(response.message).to.equal(testMessage)
+      await robot.receive(testMessage)
+      assert.deepEqual(goodListenerCalled, true)
+    })
+  })
+  describe('Listener Middleware', () => {
+    let robot = null
+    let user = null
+    beforeEach(() => {
+      robot = new Robot('hubot-mock-adapter', false, 'TestHubot')
+      user = new User('1', { name: 'node', room: '#test' })
+    })
+    afterEach(() => {
+      robot.shutdown()
+    })
+    it('allows listener callback execution', async () => {
+      let wasCalled = false
+      const listenerCallback = async () => {
+        wasCalled = true
       }
-      sinon.spy(this.robot, 'emit')
+      robot.hear(/^message123$/, listenerCallback)
+      robot.listenerMiddleware(async context => true)
 
-      this.robot.receive(testMessage, () => {
-        expect(this.robot.emit).to.have.been.called
-        expect(goodListenerCalled).to.be.ok
-        done()
-      })
+      const testMessage = new TextMessage(user, 'message123')
+      await robot.receive(testMessage)
+      assert.deepEqual(wasCalled, true)
     })
 
-    describe('Listener Middleware', function () {
-      it('allows listener callback execution', function (testDone) {
-        const listenerCallback = sinon.spy()
-        this.robot.hear(/^message123$/, listenerCallback)
-        this.robot.listenerMiddleware((context, next, done) =>
-          // Allow Listener callback execution
-          next(done)
-        )
+    it('can block listener callback execution', async () => {
+      let wasCalled = false
+      const listenerCallback = async () => {
+        wasCalled = true
+        assert.fail('Should not have been called')
+      }
+      robot.hear(/^message123$/, listenerCallback)
+      robot.listenerMiddleware(async context => false)
 
-        const testMessage = new TextMessage(this.user, 'message123')
-        this.robot.receive(testMessage, function () {
-          expect(listenerCallback).to.have.been.called
-          testDone()
-        })
-      })
-
-      it('can block listener callback execution', function (testDone) {
-        const listenerCallback = sinon.spy()
-        this.robot.hear(/^message123$/, listenerCallback)
-        this.robot.listenerMiddleware((context, next, done) =>
-          // Block Listener callback execution
-          done()
-        )
-
-        const testMessage = new TextMessage(this.user, 'message123')
-        this.robot.receive(testMessage, function () {
-          expect(listenerCallback).to.not.have.been.called
-          testDone()
-        })
-      })
-
-      it('receives the correct arguments', function (testDone) {
-        this.robot.hear(/^message123$/, function () {})
-        const testListener = this.robot.listeners[0]
-        const testMessage = new TextMessage(this.user, 'message123')
-
-        this.robot.listenerMiddleware((context, next, done) => {
-          // Escape middleware error handling for clearer test failures
-          process.nextTick(() => {
-            expect(context.listener).to.equal(testListener)
-            expect(context.response.message).to.equal(testMessage)
-            expect(next).to.be.a('function')
-            expect(done).to.be.a('function')
-            testDone()
-          })
-        })
-
-        this.robot.receive(testMessage)
-      })
-
-      it('executes middleware in order of definition', function (testDone) {
-        const execution = []
-
-        const testMiddlewareA = function (context, next, done) {
-          execution.push('middlewareA')
-          next(function () {
-            execution.push('doneA')
-            done()
-          })
-        }
-
-        const testMiddlewareB = function (context, next, done) {
-          execution.push('middlewareB')
-          next(function () {
-            execution.push('doneB')
-            done()
-          })
-        }
-
-        this.robot.listenerMiddleware(testMiddlewareA)
-        this.robot.listenerMiddleware(testMiddlewareB)
-
-        this.robot.hear(/^message123$/, () => execution.push('listener'))
-
-        const testMessage = new TextMessage(this.user, 'message123')
-        this.robot.receive(testMessage, function () {
-          expect(execution).to.deep.equal([
-            'middlewareA',
-            'middlewareB',
-            'listener',
-            'doneB',
-            'doneA'
-          ])
-          testDone()
-        })
-      })
+      const testMessage = new TextMessage(user, 'message123')
+      await robot.receive(testMessage)
+      assert.deepEqual(wasCalled, false)
     })
 
-    describe('Receive Middleware', function () {
-      it('fires for all messages, including non-matching ones', function (testDone) {
-        const middlewareSpy = sinon.spy()
-        const listenerCallback = sinon.spy()
-        this.robot.hear(/^message123$/, listenerCallback)
-        this.robot.receiveMiddleware(function (context, next, done) {
-          middlewareSpy()
-          next(done)
-        })
+    it('receives the correct arguments', async () => {
+      robot.hear(/^message123$/, async () => {})
+      const testListener = robot.listeners[0]
+      const testMessage = new TextMessage(user, 'message123')
 
-        const testMessage = new TextMessage(this.user, 'not message 123')
-
-        this.robot.receive(testMessage, function () {
-          expect(listenerCallback).to.not.have.been.called
-          expect(middlewareSpy).to.have.been.called
-          testDone()
-        })
+      robot.listenerMiddleware(async context => {
+        // Escape middleware error handling for clearer test failures
+        assert.deepEqual(context.listener, testListener)
+        assert.deepEqual(context.response.message, testMessage)
+        return true
       })
 
-      it('can block listener execution', function (testDone) {
-        const middlewareSpy = sinon.spy()
-        const listenerCallback = sinon.spy()
-        this.robot.hear(/^message123$/, listenerCallback)
-        this.robot.receiveMiddleware(function (context, next, done) {
-          // Block Listener callback execution
-          middlewareSpy()
-          done()
-        })
-
-        const testMessage = new TextMessage(this.user, 'message123')
-        this.robot.receive(testMessage, function () {
-          expect(listenerCallback).to.not.have.been.called
-          expect(middlewareSpy).to.have.been.called
-          testDone()
-        })
-      })
-
-      it('receives the correct arguments', function (testDone) {
-        this.robot.hear(/^message123$/, function () {})
-        const testMessage = new TextMessage(this.user, 'message123')
-
-        this.robot.receiveMiddleware(function (context, next, done) {
-          // Escape middleware error handling for clearer test failures
-          expect(context.response.message).to.equal(testMessage)
-          expect(next).to.be.a('function')
-          expect(done).to.be.a('function')
-          testDone()
-          next(done)
-        })
-
-        this.robot.receive(testMessage)
-      })
-
-      it('executes receive middleware in order of definition', function (testDone) {
-        const execution = []
-
-        const testMiddlewareA = function (context, next, done) {
-          execution.push('middlewareA')
-          next(function () {
-            execution.push('doneA')
-            done()
-          })
-        }
-
-        const testMiddlewareB = function (context, next, done) {
-          execution.push('middlewareB')
-          next(function () {
-            execution.push('doneB')
-            done()
-          })
-        }
-
-        this.robot.receiveMiddleware(testMiddlewareA)
-        this.robot.receiveMiddleware(testMiddlewareB)
-
-        this.robot.hear(/^message123$/, () => execution.push('listener'))
-
-        const testMessage = new TextMessage(this.user, 'message123')
-        this.robot.receive(testMessage, function () {
-          expect(execution).to.deep.equal([
-            'middlewareA',
-            'middlewareB',
-            'listener',
-            'doneB',
-            'doneA'
-          ])
-          testDone()
-        })
-      })
-
-      it('allows editing the message portion of the given response', function (testDone) {
-        const testMiddlewareA = function (context, next, done) {
-          context.response.message.text = 'foobar'
-          next()
-        }
-
-        const testMiddlewareB = function (context, next, done) {
-          // Subsequent middleware should see the modified message
-          expect(context.response.message.text).to.equal('foobar')
-          next()
-        }
-
-        this.robot.receiveMiddleware(testMiddlewareA)
-        this.robot.receiveMiddleware(testMiddlewareB)
-
-        const testCallback = sinon.spy()
-        // We'll never get to this if testMiddlewareA has not modified the message.
-        this.robot.hear(/^foobar$/, testCallback)
-
-        const testMessage = new TextMessage(this.user, 'message123')
-        this.robot.receive(testMessage, function () {
-          expect(testCallback).to.have.been.called
-          testDone()
-        })
-      })
+      await robot.receive(testMessage)
     })
 
-    describe('Response Middleware', function () {
-      it('executes response middleware in order', function (testDone) {
-        let sendSpy
-        this.robot.adapter.send = (sendSpy = sinon.spy())
-        this.robot.hear(/^message123$/, response => response.send('foobar, sir, foobar.'))
+    it('executes middleware in order of definition', async () => {
+      const execution = []
 
-        this.robot.responseMiddleware(function (context, next, done) {
-          context.strings[0] = context.strings[0].replace(/foobar/g, 'barfoo')
-          next()
-        })
+      const testMiddlewareA = async context => {
+        execution.push('middlewareA')
+      }
 
-        this.robot.responseMiddleware(function (context, next, done) {
-          context.strings[0] = context.strings[0].replace(/barfoo/g, 'replaced bar-foo')
-          next()
-        })
+      const testMiddlewareB = async context => {
+        execution.push('middlewareB')
+      }
 
-        const testMessage = new TextMessage(this.user, 'message123')
-        this.robot.receive(testMessage, function () {
-          expect(sendSpy.getCall(0).args[1]).to.equal('replaced bar-foo, sir, replaced bar-foo.')
-          testDone()
-        })
-      })
+      robot.listenerMiddleware(testMiddlewareA)
+      robot.listenerMiddleware(testMiddlewareB)
 
-      it('allows replacing outgoing strings', function (testDone) {
-        let sendSpy
-        this.robot.adapter.send = (sendSpy = sinon.spy())
-        this.robot.hear(/^message123$/, response => response.send('foobar, sir, foobar.'))
+      robot.hear(/^message123$/, () => execution.push('listener'))
 
-        this.robot.responseMiddleware(function (context, next, done) {
-          context.strings = ['whatever I want.']
-          next()
-        })
-
-        const testMessage = new TextMessage(this.user, 'message123')
-        this.robot.receive(testMessage, function () {
-          expect(sendSpy.getCall(0).args[1]).to.deep.equal('whatever I want.')
-          testDone()
-        })
-      })
-
-      it('marks plaintext as plaintext', function (testDone) {
-        const sendSpy = sinon.spy()
-        this.robot.adapter.send = sendSpy
-        this.robot.hear(/^message123$/, response => response.send('foobar, sir, foobar.'))
-        this.robot.hear(/^message456$/, response => response.play('good luck with that'))
-
-        let method
-        let plaintext
-        this.robot.responseMiddleware(function (context, next, done) {
-          method = context.method
-          plaintext = context.plaintext
-          next(done)
-        })
-
-        const testMessage = new TextMessage(this.user, 'message123')
-
-        this.robot.receive(testMessage, () => {
-          expect(plaintext).to.equal(true)
-          expect(method).to.equal('send')
-          const testMessage2 = new TextMessage(this.user, 'message456')
-          this.robot.receive(testMessage2, function () {
-            expect(plaintext).to.equal(undefined)
-            expect(method).to.equal('play')
-            testDone()
-          })
-        })
-      })
-
-      it('does not send trailing functions to middleware', function (testDone) {
-        let sendSpy
-        this.robot.adapter.send = (sendSpy = sinon.spy())
-        let asserted = false
-        const postSendCallback = function () {}
-        this.robot.hear(/^message123$/, response => response.send('foobar, sir, foobar.', postSendCallback))
-
-        this.robot.responseMiddleware(function (context, next, done) {
-          // We don't send the callback function to middleware, so it's not here.
-          expect(context.strings).to.deep.equal(['foobar, sir, foobar.'])
-          expect(context.method).to.equal('send')
-          asserted = true
-          next()
-        })
-
-        const testMessage = new TextMessage(this.user, 'message123')
-        this.robot.receive(testMessage, function () {
-          expect(asserted).to.equal(true)
-          expect(sendSpy.getCall(0).args[1]).to.equal('foobar, sir, foobar.')
-          expect(sendSpy.getCall(0).args[2]).to.equal(postSendCallback)
-          testDone()
-        })
-      })
+      const testMessage = new TextMessage(user, 'message123')
+      await robot.receive(testMessage)
+      execution.push('done')
+      assert.deepEqual(execution, [
+        'middlewareA',
+        'middlewareB',
+        'listener',
+        'done'
+      ])
     })
   })
-})
+  describe('Receive Middleware', () => {
+    let robot = null
+    let user = null
+    beforeEach(() => {
+      robot = new Robot('hubot-mock-adapter', false, 'TestHubot')
+      user = new User('1', { name: 'node', room: '#test' })
+    })
+    afterEach(() => {
+      robot.shutdown()
+    })
+    it('fires for all messages, including non-matching ones', async () => {
+      let middlewareWasCalled = false
+      const middlewareSpy = async () => {
+        middlewareWasCalled = true
+      }
+      let wasCalled = false
+      const listenerCallback = async () => {
+        wasCalled = true
+        assert.fail('Should not have been called')
+      }
+      robot.hear(/^message123$/, listenerCallback)
+      robot.receiveMiddleware(async context => {
+        middlewareSpy()
+      })
 
-describe('Robot Defaults', () => {
-  let robot = null
-  beforeEach(async () => {
-    process.env.EXPRESS_PORT = 0
-    robot = new Robot(null, true, 'TestHubot')
-    robot.alias = 'Hubot'
-    await robot.loadAdapter()
-    robot.run()
-  })
-  afterEach(() => {
-    robot.shutdown()
-  })
-  it('should load the builtin shell adapter by default', async () => {
-    expect(robot.adapter.name).to.equal('Shell')
-  })
-})
+      const testMessage = new TextMessage(user, 'not message 123')
 
-describe('Robot ES6', () => {
-  let robot = null
-  beforeEach(async () => {
-    process.env.EXPRESS_PORT = 0
-    robot = new Robot('MockAdapter', true, 'TestHubot')
-    robot.alias = 'Hubot'
-    await robot.loadAdapter('./test/fixtures/MockAdapter.mjs')
-    robot.loadFile(path.resolve('./test/fixtures/'), 'TestScript.js')
-    robot.run()
-  })
-  afterEach(() => {
-    robot.shutdown()
-  })
-  it('should load an ES6 module adapter from a file', async () => {
-    const { MockAdapter } = await import('./fixtures/MockAdapter.mjs')
-    expect(robot.adapter).to.be.an.instanceOf(MockAdapter)
-    expect(robot.adapter.name).to.equal('MockAdapter')
-  })
-  it('should respond to a message', async () => {
-    const sent = (envelop, strings) => {
-      expect(strings).to.deep.equal(['test response'])
-    }
-    robot.adapter.on('send', sent)
-    await robot.adapter.receive(new TextMessage('tester', 'hubot test'))
-  })
-})
+      await robot.receive(testMessage)
+      assert.deepEqual(wasCalled, false)
+      assert.deepEqual(middlewareWasCalled, true)
+    })
 
-describe('Robot Coffeescript', () => {
-  let robot = null
-  beforeEach(async () => {
-    process.env.EXPRESS_PORT = 0
-    robot = new Robot('MockAdapter', true, 'TestHubot')
-    robot.alias = 'Hubot'
-    await robot.loadAdapter('./test/fixtures/MockAdapter.coffee')
-    robot.loadFile(path.resolve('./test/fixtures/'), 'TestScript.coffee')
-    robot.run()
+    it('can block listener execution', async () => {
+      let middlewareWasCalled = false
+      const middlewareSpy = async () => {
+        middlewareWasCalled = true
+      }
+      let wasCalled = false
+      const listenerCallback = async () => {
+        wasCalled = true
+        assert.fail('Should not have been called')
+      }
+      robot.hear(/^message123$/, listenerCallback)
+      robot.receiveMiddleware(async context => {
+        middlewareSpy()
+        return false
+      })
+
+      const testMessage = new TextMessage(user, 'message123')
+      await robot.receive(testMessage)
+      assert.deepEqual(wasCalled, false)
+      assert.deepEqual(middlewareWasCalled, true)
+    })
+
+    it('receives the correct arguments', async () => {
+      robot.hear(/^message123$/, () => {})
+      const testMessage = new TextMessage(user, 'message123')
+
+      robot.receiveMiddleware(async context => {
+        assert.deepEqual(context.response.message, testMessage)
+      })
+
+      await robot.receive(testMessage)
+    })
+
+    it('executes receive middleware in order of definition', async () => {
+      const execution = []
+
+      const testMiddlewareA = async context => {
+        execution.push('middlewareA')
+      }
+
+      const testMiddlewareB = async context => {
+        execution.push('middlewareB')
+      }
+
+      robot.receiveMiddleware(testMiddlewareA)
+      robot.receiveMiddleware(testMiddlewareB)
+      robot.hear(/^message123$/, () => execution.push('listener'))
+
+      const testMessage = new TextMessage(user, 'message123')
+      await robot.receive(testMessage)
+      execution.push('done')
+      assert.deepEqual(execution, [
+        'middlewareA',
+        'middlewareB',
+        'listener',
+        'done'
+      ])
+    })
+
+    it('allows editing the message portion of the given response', async () => {
+      const testMiddlewareA = async context => {
+        context.response.message.text = 'foobar'
+      }
+
+      const testMiddlewareB = async context => {
+        assert.equal(context.response.message.text, 'foobar')
+      }
+
+      robot.receiveMiddleware(testMiddlewareA)
+      robot.receiveMiddleware(testMiddlewareB)
+      let wasCalled = false
+      const testCallback = () => {
+        wasCalled = true
+      }
+      // We'll never get to this if testMiddlewareA has not modified the message.
+      robot.hear(/^foobar$/, testCallback)
+
+      const testMessage = new TextMessage(user, 'message123')
+      await robot.receive(testMessage)
+      assert.deepEqual(wasCalled, true)
+    })
   })
-  afterEach(() => {
-    robot.shutdown()
+  describe('Response Middleware', () => {
+    let robot = null
+    let user = null
+    beforeEach(async () => {
+      hook('hubot-mock-adapter', mockAdapter)
+      robot = new Robot('hubot-mock-adapter', false, 'TestHubot')
+      user = new User('1', { name: 'node', room: '#test' })
+      robot.alias = 'Hubot'
+      await robot.loadAdapter()
+      await robot.run()
+    })
+    afterEach(() => {
+      robot.shutdown()
+    })
+    it('executes response middleware in order', async () => {
+      let wasCalled = false
+      robot.adapter.send = async (envelope, ...strings) => {
+        assert.deepEqual(strings, ['replaced bar-foo, sir, replaced bar-foo.'])
+        wasCalled = true
+      }
+      robot.hear(/^message123$/, async response => await response.send('foobar, sir, foobar.'))
+
+      robot.responseMiddleware(async context => {
+        context.strings[0] = context.strings[0].replace(/foobar/g, 'barfoo')
+      })
+
+      robot.responseMiddleware(async context => {
+        context.strings[0] = context.strings[0].replace(/barfoo/g, 'replaced bar-foo')
+      })
+
+      const testMessage = new TextMessage(user, 'message123')
+      await robot.receive(testMessage)
+      assert.deepEqual(wasCalled, true)
+    })
+
+    it('allows replacing outgoing strings', async () => {
+      let wasCalled = false
+      robot.adapter.send = async (envelope, ...strings) => {
+        wasCalled = true
+        assert.deepEqual(strings, ['whatever I want.'])
+      }
+      robot.hear(/^message123$/, async response => response.send('foobar, sir, foobar.'))
+
+      robot.responseMiddleware(async context => {
+        context.strings = ['whatever I want.']
+      })
+
+      const testMessage = new TextMessage(user, 'message123')
+      await robot.receive(testMessage)
+      assert.deepEqual(wasCalled, true)
+    })
+
+    it('marks plaintext as plaintext', async () => {
+      robot.adapter.send = async (envelope, ...strings) => {
+        assert.deepEqual(strings, ['foobar, sir, foobar.'])
+      }
+      robot.adapter.play = async (envelope, ...strings) => {
+        assert.deepEqual(strings, ['good luck with that'])
+      }
+
+      robot.hear(/^message123$/, async response => await response.send('foobar, sir, foobar.'))
+      robot.hear(/^message456$/, async response => await response.play('good luck with that'))
+
+      let method
+      let plaintext
+      robot.responseMiddleware(async context => {
+        method = context.method
+        plaintext = context.plaintext
+      })
+
+      const testMessage = new TextMessage(user, 'message123')
+
+      await robot.receive(testMessage)
+      assert.deepEqual(plaintext, true)
+      assert.equal(method, 'send')
+      const testMessage2 = new TextMessage(user, 'message456')
+      await robot.receive(testMessage2)
+      assert.deepEqual(plaintext, undefined)
+      assert.equal(method, 'play')
+    })
+
+    it('does not send trailing functions to middleware', async () => {
+      let wasCalled = false
+      robot.adapter.send = async (envelope, ...strings) => {
+        wasCalled = true
+        assert.deepEqual(strings, ['foobar, sir, foobar.'])
+      }
+
+      let asserted = false
+      robot.hear(/^message123$/, async response => await response.send('foobar, sir, foobar.'))
+
+      robot.responseMiddleware(async context => {
+        // We don't send the callback function to middleware, so it's not here.
+        assert.deepEqual(context.strings, ['foobar, sir, foobar.'])
+        assert.equal(context.method, 'send')
+        asserted = true
+      })
+
+      const testMessage = new TextMessage(user, 'message123')
+      await robot.receive(testMessage)
+      assert.deepEqual(asserted, true)
+      assert.deepEqual(wasCalled, true)
+    })
   })
-  it('should load a CoffeeScript adapter from a file', async () => {
-    expect(robot.adapter.name).to.equal('MockAdapter')
+  describe('Robot ES6', () => {
+    let robot = null
+    beforeEach(async () => {
+      robot = new Robot('MockAdapter', false, 'TestHubot')
+      robot.alias = 'Hubot'
+      await robot.loadAdapter('./test/fixtures/MockAdapter.mjs')
+      await robot.loadFile(path.resolve('./test/fixtures/'), 'TestScript.js')
+      await robot.run()
+    })
+    afterEach(() => {
+      robot.shutdown()
+    })
+    it('should load an ES6 module adapter from a file', async () => {
+      const { MockAdapter } = await import('./fixtures/MockAdapter.mjs')
+      assert.ok(robot.adapter instanceof MockAdapter)
+      assert.equal(robot.adapter.name, 'MockAdapter')
+    })
+    it('should respond to a message', async () => {
+      const sent = async (envelop, strings) => {
+        assert.deepEqual(strings, ['test response'])
+      }
+      robot.adapter.on('send', sent)
+      await robot.receive(new TextMessage('tester', 'hubot test'))
+    })
   })
-  it('should load a coffeescript file and respond to a message', async () => {
-    const sent = (envelop, strings) => {
-      expect(strings).to.deep.equal(['test response from coffeescript'])
-    }
-    robot.adapter.on('send', sent)
-    await robot.adapter.receive(new TextMessage('tester', 'hubot test'))
+  describe('Robot Coffeescript', () => {
+    let robot = null
+    beforeEach(async () => {
+      robot = new Robot('MockAdapter', false, 'TestHubot')
+      robot.alias = 'Hubot'
+      await robot.loadAdapter('./test/fixtures/MockAdapter.coffee')
+      await robot.loadFile(path.resolve('./test/fixtures/'), 'TestScript.coffee')
+      await robot.run()
+    })
+    afterEach(() => {
+      robot.shutdown()
+    })
+    it('should load a CoffeeScript adapter from a file', async () => {
+      assert.equal(robot.adapter.name, 'MockAdapter')
+    })
+    it('should load a coffeescript file and respond to a message', async () => {
+      const sent = async (envelop, strings) => {
+        assert.deepEqual(strings, ['test response from coffeescript'])
+      }
+      robot.adapter.on('send', sent)
+      await robot.receive(new TextMessage('tester', 'hubot test'))
+    })
+  })
+  describe('Robot Defaults', () => {
+    let robot = null
+    beforeEach(async () => {
+      robot = new Robot(null, false, 'TestHubot')
+      robot.alias = 'Hubot'
+      await robot.loadAdapter()
+      await robot.run()
+    })
+    afterEach(() => {
+      robot.shutdown()
+      process.removeAllListeners()
+    })
+    it('should load the builtin shell adapter by default', async () => {
+      assert.equal(robot.adapter.name, 'Shell')
+    })
+  })
+  describe('Robot HTTP Service', () => {
+    it('should start a web service', async () => {
+      process.env.PORT = 3000
+      hook('hubot-mock-adapter', mockAdapter)
+      const robot = new Robot('hubot-mock-adapter', true, 'TestHubot')
+      await robot.loadAdapter()
+      await robot.run()
+      const res = await fetch(`http://127.0.0.1:${process.env.PORT}/hubot/version`)
+      assert.equal(res.status, 404)
+      assert.match(await res.text(), /Cannot GET \/hubot\/version/ig)
+      robot.shutdown()
+      reset()
+    })
   })
 })

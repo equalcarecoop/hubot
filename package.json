@@ -1,6 +1,6 @@
 {
   "name": "hubot",
-  "version": "6.0.0",
+  "version": "9.1.0",
   "author": "hubot",
   "keywords": [
     "github",
@@ -15,28 +15,20 @@
     "url": "https://github.com/hubotio/hubot.git"
   },
   "dependencies": {
-    "async": "^3.2.4",
     "cline": "^0.8.2",
     "coffeescript": "^2.7.0",
     "connect-multiparty": "^2.2.0",
     "express": "^4.18.2",
     "express-basic-auth": "^1.2.1",
     "optparse": "^1.0.5",
-    "pino": "^8.11.0",
-    "standard": "^17.1.0"
+    "pino": "^8.11.0"
   },
   "devDependencies": {
-    "chai": "^4.3.7",
-    "is-circular": "^1.0.2",
-    "mocha": "^10.2.0",
-    "mockery": "^2.1.0",
-    "semantic-release": "^21.0.1",
-    "sinon": "^15.0.4",
-    "sinon-chai": "^3.7.0"
+    "standard": "^17.1.0"
   },
   "engines": {
-    "node": "> 4.0.0",
-    "npm": "> 2.0.0"
+    "node": ">= 18",
+    "npm": ">= 9"
   },
   "main": "./index",
   "bin": {
@@ -44,8 +36,9 @@
   },
   "scripts": {
     "start": "bin/hubot",
+    "gen": "bin/hubot --create myhubot",
     "pretest": "standard",
-    "test": "mocha --exit",
+    "test": "node --test",
     "test:smoke": "node src/**/*.js",
     "test:e2e": "bin/e2e-test.sh"
   },

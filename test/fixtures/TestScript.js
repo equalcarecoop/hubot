@@ -5,9 +5,9 @@
 // Commands:
 //   hubot test - Responds with a test response
 //
-
 module.exports = robot => {
-  robot.respond('test', res => {
-    res.send('test response')
+  robot.hasLoadedTestJsScript = true
+  robot.respond('test', async res => {
+    await res.send('test response')
   })
 }

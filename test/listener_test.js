@@ -1,377 +1,314 @@
 'use strict'
 
-/* global describe, beforeEach, it */
 /* eslint-disable no-unused-expressions */
 
-// Assertions and Stubbing
-const chai = require('chai')
-const sinon = require('sinon')
-chai.use(require('sinon-chai'))
-
-const expect = chai.expect
+const { describe, it } = require('node:test')
+const assert = require('node:assert/strict')
 
 // Hubot classes
-const EnterMessage = require('../src/message').EnterMessage
-const TextMessage = require('../src/message').TextMessage
-const Listener = require('../src/listener').Listener
-const TextListener = require('../src/listener').TextListener
-const Response = require('../src/response')
-const User = require('../src/user')
+const EnterMessage = require('../src/message.js').EnterMessage
+const TextMessage = require('../src/message.js').TextMessage
+const Listener = require('../src/listener.js').Listener
+const TextListener = require('../src/listener.js').TextListener
+const Response = require('../src/response.js')
+const User = require('../src/user.js')
+const Middleware = require('../src/middleware.js')
 
-describe('Listener', function () {
-  beforeEach(function () {
-    // Dummy robot
-    this.robot = {
-      // Re-throw AssertionErrors for clearer test failures
-      emit (name, err, response) {
-        if (err.constructor.name === 'AssertionError') {
-          return process.nextTick(function () {
-            throw err
-          })
-        }
-      },
-      // Ignore log messages
-      logger: {
-        debug () {}
-      },
-      // Why is this part of the Robot object??
-      Response
-    }
-
-    // Test user
-    this.user = new User({
-      id: 1,
-      name: 'hubottester',
-      room: '#mocha'
-    })
+describe('Listener', () => {
+  const robot = {
+    // Re-throw AssertionErrors for clearer test failures
+    emit (name, err, response) {
+      if (err.constructor.name === 'AssertionError') {
+        return process.nextTick(() => {
+          throw err
+        })
+      }
+    },
+    // Ignore log messages
+    logger: {
+      debug () {},
+      error (...args) {
+        // console.error(...args)
+      }
+    },
+    // Why is this part of the Robot object??
+    Response
+  }
+  const user = new User({
+    id: 1,
+    name: 'hubottester',
+    room: '#mocha'
   })
 
-  describe('Unit Tests', function () {
-    describe('#call', function () {
-      it('calls the matcher', function (done) {
-        const callback = sinon.spy()
-        const testMatcher = sinon.spy()
-        const testMessage = {}
-
-        const testListener = new Listener(this.robot, testMatcher, callback)
-        testListener.call(testMessage, function (_) {
-          expect(testMatcher).to.have.been.calledWith(testMessage)
-          done()
+  describe('Unit Tests', () => {
+    describe('#call', () => {
+      it('calls the matcher', async () => {
+        const testMessage = new TextMessage(user, 'message')
+        const testMatcher = message => {
+          assert.deepEqual(message, testMessage)
+          return true
+        }
+        const middleware = new Middleware(robot)
+        middleware.register(async context => {
+          assert.deepEqual(context.listener, testListener)
         })
+        const testListener = new Listener(robot, testMatcher, async response => true)
+        await testListener.call(testMessage, middleware)
       })
 
-      it('passes the matcher result on to the listener callback', function (done) {
+      it('the response object should have the match results so listeners can have access to it', async () => {
         const matcherResult = {}
-        const testMatcher = sinon.stub().returns(matcherResult)
-        const testMessage = {}
-        const listenerCallback = response => expect(response.match).to.be.equal(matcherResult)
-
-        // sanity check; matcherResult must be truthy
-        expect(matcherResult).to.be.ok
-
-        const testListener = new Listener(this.robot, testMatcher, listenerCallback)
-        testListener.call(testMessage, function (result) {
-          // sanity check; message should have been processed
-          expect(testMatcher).to.have.been.called
-          expect(result).to.be.ok
-
-          done()
-        })
+        const testMatcher = message => {
+          return matcherResult
+        }
+        const testMessage = new TextMessage(user, 'response should have match')
+        const listenerCallback = response => assert.deepEqual(response.match, matcherResult)
+        const testListener = new Listener(robot, testMatcher, listenerCallback)
+        await testListener.call(testMessage, null)
       })
 
-      describe('if the matcher returns true', function () {
-        beforeEach(function () {
-          this.createListener = function (cb) {
-            return new Listener(this.robot, sinon.stub().returns(true), cb)
+      describe('if the matcher returns true', () => {
+        const createListener = cb => {
+          return new Listener(robot, () => true, cb)
+        }
+
+        it('executes the listener callback', async () => {
+          const listenerCallback = async response => {
+            assert.deepEqual(response.message, testMessage)
           }
-        })
-
-        it('executes the listener callback', function (done) {
-          const listenerCallback = sinon.spy()
           const testMessage = {}
 
-          const testListener = this.createListener(listenerCallback)
-          testListener.call(testMessage, function (_) {
-            expect(listenerCallback).to.have.been.called
-            done()
-          })
+          const testListener = createListener(listenerCallback)
+          await testListener.call(testMessage, async (_) => {})
         })
 
-        it('returns true', function () {
+        it('returns true', () => {
           const testMessage = {}
 
-          const testListener = this.createListener(function () {})
+          const testListener = createListener(() => {})
           const result = testListener.call(testMessage)
-          expect(result).to.be.ok
+          assert.ok(result)
         })
 
-        it('calls the provided callback with true', function (done) {
+        it('calls the provided callback with true', (t, done) => {
           const testMessage = {}
 
-          const testListener = this.createListener(function () {})
-          testListener.call(testMessage, function (result) {
-            expect(result).to.be.ok
+          const testListener = createListener(() => {})
+          testListener.call(testMessage, async result => {
+            assert.ok(result)
             done()
           })
         })
 
-        it('calls the provided callback after the function returns', function (done) {
+        it('calls the provided callback after the function returns', (t, done) => {
           const testMessage = {}
 
-          const testListener = this.createListener(function () {})
+          const testListener = createListener(() => {})
           let finished = false
-          testListener.call(testMessage, function (result) {
-            expect(finished).to.be.ok
+          testListener.call(testMessage, async result => {
+            assert.ok(finished)
             done()
           })
           finished = true
         })
 
-        it('handles uncaught errors from the listener callback', function (done) {
+        it('handles uncaught errors from the listener callback', async () => {
           const testMessage = {}
           const theError = new Error()
 
-          const listenerCallback = function (response) {
+          const listenerCallback = async response => {
             throw theError
           }
 
-          this.robot.emit = function (name, err, response) {
-            expect(name).to.equal('error')
-            expect(err).to.equal(theError)
-            expect(response.message).to.equal(testMessage)
-            done()
+          robot.emit = (name, err, response) => {
+            assert.equal(name, 'error')
+            assert.deepEqual(err, theError)
+            assert.deepEqual(response.message, testMessage)
           }
 
-          const testListener = this.createListener(listenerCallback)
-          testListener.call(testMessage, sinon.spy())
+          const testListener = createListener(listenerCallback)
+          await testListener.call(testMessage, async response => {})
         })
 
-        it('calls the provided callback with true if there is an error thrown by the listener callback', function (done) {
+        it('calls the provided callback with true if there is an error thrown by the listener callback', (t, done) => {
           const testMessage = {}
           const theError = new Error()
 
-          const listenerCallback = function (response) {
+          const listenerCallback = async response => {
             throw theError
           }
 
-          const testListener = this.createListener(listenerCallback)
-          testListener.call(testMessage, function (result) {
-            expect(result).to.be.ok
+          const testListener = createListener(listenerCallback)
+          testListener.call(testMessage, async result => {
+            assert.ok(result)
             done()
           })
         })
 
-        it('calls the listener callback with a Response that wraps the Message', function (done) {
+        it('calls the listener callback with a Response that wraps the Message', async () => {
           const testMessage = {}
-
-          const listenerCallback = function (response) {
-            expect(response.message).to.equal(testMessage)
-            done()
+          const listenerCallback = async response => {
+            assert.deepEqual(response.message, testMessage)
           }
-
-          const testListener = this.createListener(listenerCallback)
-
-          testListener.call(testMessage, sinon.spy())
+          const testListener = createListener(listenerCallback)
+          await testListener.call(testMessage, async response => {})
         })
 
-        it('passes through the provided middleware stack', function (testDone) {
+        it('passes through the provided middleware stack', async () => {
           const testMessage = {}
-
-          const testListener = this.createListener(function () {})
+          const testListener = createListener(async () => {})
           const testMiddleware = {
             execute (context, next, done) {
-              expect(context.listener).to.be.equal(testListener)
-              expect(context.response).to.be.instanceof(Response)
-              expect(context.response.message).to.be.equal(testMessage)
-              expect(next).to.be.a('function')
-              expect(done).to.be.a('function')
-              testDone()
+              assert.deepEqual(context.listener, testListener)
+              assert.ok(context.response instanceof Response)
+              assert.deepEqual(context.response.message, testMessage)
+              assert.ok(typeof next === 'function')
+              assert.ok(typeof done === 'function')
             }
           }
 
-          testListener.call(testMessage, testMiddleware, sinon.spy())
+          await testListener.call(testMessage, testMiddleware)
         })
 
-        it('executes the listener callback if middleware succeeds', function (testDone) {
-          const listenerCallback = sinon.spy()
+        it('executes the listener callback if middleware succeeds', async () => {
+          let wasCalled = false
+          const listenerCallback = async () => {
+            wasCalled = true
+          }
           const testMessage = {}
 
-          const testListener = this.createListener(listenerCallback)
+          const testListener = createListener(listenerCallback)
 
-          testListener.call(testMessage, function (result) {
-            expect(listenerCallback).to.have.been.called
-            // Matcher matched, so we true
-            expect(result).to.be.ok
-            testDone()
+          await testListener.call(testMessage, async result => {
+            assert.ok(result)
           })
+          assert.deepEqual(wasCalled, true)
         })
 
-        it('does not execute the listener callback if middleware fails', function (testDone) {
-          const listenerCallback = sinon.spy()
+        it('does not execute the listener callback if middleware fails', async () => {
+          let wasCalled = false
+          const listenerCallback = async () => {
+            wasCalled = true
+          }
           const testMessage = {}
 
-          const testListener = this.createListener(listenerCallback)
+          const testListener = createListener(listenerCallback)
           const testMiddleware = {
-            execute (context, next, done) {
-              // Middleware fails
-              done()
+            async execute (context) {
+              return false
             }
           }
 
-          testListener.call(testMessage, testMiddleware, function (result) {
-            expect(listenerCallback).to.not.have.been.called
-            // Matcher still matched, so we true
-            expect(result).to.be.ok
-            testDone()
+          await testListener.call(testMessage, testMiddleware, async result => {
+            assert.ok(result)
           })
-        })
-
-        it('unwinds the middleware stack if there is an error in the listener callback', function (testDone) {
-          const listenerCallback = sinon.stub().throws(new Error())
-          const testMessage = {}
-          let extraDoneFunc = null
-
-          const testListener = this.createListener(listenerCallback)
-          const testMiddleware = {
-            execute (context, next, done) {
-              extraDoneFunc = sinon.spy(done)
-              next(context, extraDoneFunc)
-            }
-          }
-
-          testListener.call(testMessage, testMiddleware, function (result) {
-            // Listener callback was called (and failed)
-            expect(listenerCallback).to.have.been.called
-            // Middleware stack was unwound correctly
-            expect(extraDoneFunc).to.have.been.called
-            // Matcher still matched, so we true
-            expect(result).to.be.ok
-            testDone()
-          })
+          assert.deepEqual(wasCalled, false)
         })
       })
 
-      describe('if the matcher returns false', function () {
-        beforeEach(function () {
-          this.createListener = function (cb) {
-            return new Listener(this.robot, sinon.stub().returns(false), cb)
+      describe('if the matcher returns false', () => {
+        const createListener = cb => {
+          return new Listener(robot, () => false, cb)
+        }
+
+        it('does not execute the listener callback', async () => {
+          let wasCalled = false
+          const listenerCallback = async () => {
+            wasCalled = true
           }
-        })
-
-        it('does not execute the listener callback', function (done) {
-          const listenerCallback = sinon.spy()
           const testMessage = {}
 
-          const testListener = this.createListener(listenerCallback)
-          testListener.call(testMessage, function (_) {
-            expect(listenerCallback).to.not.have.been.called
-            done()
+          const testListener = createListener(listenerCallback)
+          await testListener.call(testMessage, async context => {
+            assert.deepEqual(wasCalled, false)
           })
         })
 
-        it('returns false', function () {
+        it('returns null', async () => {
           const testMessage = {}
 
-          const testListener = this.createListener(function () {})
-          const result = testListener.call(testMessage)
-          expect(result).to.not.be.ok
+          const testListener = createListener(async () => {})
+          const result = await testListener.call(testMessage)
+          assert.deepEqual(result, null)
         })
 
-        it('calls the provided callback with false', function (done) {
+        it('returns null because there is no matched listener', async () => {
           const testMessage = {}
-
-          const testListener = this.createListener(function () {})
-          testListener.call(testMessage, function (result) {
-            expect(result).to.not.be.ok
-            done()
-          })
-        })
-
-        it('calls the provided callback after the function returns', function (done) {
-          const testMessage = {}
-
-          const testListener = this.createListener(function () {})
-          let finished = false
-          testListener.call(testMessage, function (result) {
-            expect(finished).to.be.ok
-            done()
-          })
-          finished = true
-        })
-
-        it('does not execute any middleware', function (done) {
-          const testMessage = {}
-
-          const testListener = this.createListener(function () {})
-          const testMiddleware = { execute: sinon.spy() }
-
-          testListener.call(testMessage, result => {
-            expect(testMiddleware.execute).to.not.have.been.called
-            done()
-          })
+          const testListener = createListener(async () => {})
+          const middleware = context => {
+            throw new Error('Should not be called')
+          }
+          const result = await testListener.call(testMessage, middleware)
+          assert.deepEqual(result, null)
         })
       })
     })
 
-    describe('#constructor', function () {
-      it('requires a matcher', () => expect(function () {
-        return new Listener(this.robot, undefined, {}, sinon.spy())
-      }).to.throw(Error))
+    describe('#constructor', () => {
+      it('requires a matcher', () => {
+        assert.throws(() => {
+          return new Listener(robot, undefined, {}, async () => {})
+        }, Error)
+      })
 
-      it('requires a callback', function () {
+      it('requires a callback', () => {
         // No options
-        expect(function () {
-          return new Listener(this.robot, sinon.spy())
-        }).to.throw(Error)
+        assert.throws(() => {
+          return new Listener(robot, () => {})
+        }, Error)
         // With options
-        expect(function () {
-          return new Listener(this.robot, sinon.spy(), {})
-        }).to.throw(Error)
+        assert.throws(() => {
+          return new Listener(robot, () => {}, {})
+        }, Error)
       })
 
-      it('gracefully handles missing options', function () {
-        const testMatcher = sinon.spy()
-        const listenerCallback = sinon.spy()
-        const testListener = new Listener(this.robot, testMatcher, listenerCallback)
+      it('gracefully handles missing options', () => {
+        const testMatcher = () => {}
+        const listenerCallback = async () => {}
+        const testListener = new Listener(robot, testMatcher, listenerCallback)
         // slightly brittle because we are testing for the default options Object
-        expect(testListener.options).to.deep.equal({ id: null })
-        expect(testListener.callback).to.be.equal(listenerCallback)
+        assert.deepEqual(testListener.options, { id: null })
+        assert.deepEqual(testListener.callback, listenerCallback)
       })
 
-      it('gracefully handles a missing ID (set to null)', function () {
-        const testMatcher = sinon.spy()
-        const listenerCallback = sinon.spy()
-        const testListener = new Listener(this.robot, testMatcher, {}, listenerCallback)
-        expect(testListener.options.id).to.be.null
+      it('gracefully handles a missing ID (set to null)', () => {
+        const testMatcher = () => {}
+        const listenerCallback = async () => {}
+        const testListener = new Listener(robot, testMatcher, {}, listenerCallback)
+        assert.deepEqual(testListener.options.id, null)
       })
     })
 
     describe('TextListener', () =>
-      describe('#matcher', function () {
-        it('matches TextMessages', function () {
-          const callback = sinon.spy()
-          const testMessage = new TextMessage(this.user, 'test')
-          testMessage.match = sinon.stub().returns(true)
+      describe('#matcher', () => {
+        it('matches TextMessages', () => {
+          const callback = async () => {}
+          const testMessage = new TextMessage(user, 'test')
+
+          testMessage.match = regex => {
+            assert.deepEqual(regex, testRegex)
+            return true
+          }
           const testRegex = /test/
 
-          const testListener = new TextListener(this.robot, testRegex, callback)
+          const testListener = new TextListener(robot, testRegex, callback)
           const result = testListener.matcher(testMessage)
 
-          expect(result).to.be.ok
-          expect(testMessage.match).to.have.been.calledWith(testRegex)
+          assert.ok(result)
         })
 
-        it('does not match EnterMessages', function () {
-          const callback = sinon.spy()
-          const testMessage = new EnterMessage(this.user)
-          testMessage.match = sinon.stub().returns(true)
+        it('does not match EnterMessages', () => {
+          const callback = async () => {}
+          const testMessage = new EnterMessage(user)
+          testMessage.match = () => {
+            assert.fail('match should not be called')
+          }
           const testRegex = /test/
 
-          const testListener = new TextListener(this.robot, testRegex, callback)
+          const testListener = new TextListener(robot, testRegex, callback)
           const result = testListener.matcher(testMessage)
 
-          expect(result).to.not.be.ok
-          expect(testMessage.match).to.not.have.been.called
+          assert.deepEqual(result, undefined)
         })
       })
     )

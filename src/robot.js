@@ -4,7 +4,6 @@ const fs = require('fs')
 const path = require('path')
 const pathToFileURL = require('url').pathToFileURL
 
-const async = require('async')
 const pino = require('pino')
 const HttpClient = require('./httpclient')
 
@@ -51,11 +50,6 @@ class Robot {
       name,
       level: process.env.HUBOT_LOG_LEVEL || 'info'
     })
-    Reflect.defineProperty(this.logger, 'warning', {
-      value: this.logger.warn,
-      enumerable: true,
-      configurable: true
-    })
 
     this.pingIntervalId = null
     this.globalHttpOptions = {}
@@ -73,10 +67,6 @@ class Robot {
     this.on('error', (err, res) => {
       return this.invokeErrorHandlers(err, res)
     })
-    this.onUncaughtException = err => {
-      return this.emit('error', err)
-    }
-    process.on('uncaughtException', this.onUncaughtException)
   }
 
   // Public: Adds a custom Listener with the provided matcher, options, and
@@ -233,9 +223,8 @@ class Robot {
       options = {}
     }
 
-    this.listen(isCatchAllMessage, options, function listenCallback (msg) {
-      msg.message = msg.message.message
-      callback(msg)
+    this.listen(isCatchAllMessage, options, async msg => {
+      await callback(msg.message)
     })
   }
 
@@ -244,11 +233,8 @@ class Robot {
   //
   // middleware - A function that determines whether or not a given matching
   //              Listener should be executed. The function is called with
-  //              (context, next, done). If execution should
-  //              continue (next middleware, Listener callback), the middleware
-  //              should call the 'next' function with 'done' as an argument.
-  //              If not, the middleware should call the 'done' function with
-  //              no arguments.
+  //              (context). If execution should, the middleware should return
+  //              true. If not, the middleware should return false.
   //
   // Returns nothing.
   listenerMiddleware (middleware) {
@@ -260,9 +246,8 @@ class Robot {
   //
   // middleware - A function that examines an outgoing message and can modify
   //              it or prevent its sending. The function is called with
-  //              (context, next, done). If execution should continue,
-  //              the middleware should call next(done). If execution should
-  //              stop, the middleware should call done(). To modify the
+  //              (context). If execution should continue, return true
+  //              otherwise return false to stop. To modify the
   //              outgoing message, set context.string to a new message.
   //
   // Returns nothing.
@@ -273,11 +258,10 @@ class Robot {
   // Public: Registers new middleware for execution before matching
   //
   // middleware - A function that determines whether or not listeners should be
-  //              checked. The function is called with (context, next, done). If
-  //              ext, next, done). If execution should continue to the next
-  //              middleware or matching phase, it should call the 'next'
-  //              function with 'done' as an argument. If not, the middleware
-  //              should call the 'done' function with no arguments.
+  //              checked. The function is called with (context). If execution
+  //              should continue to the next
+  //              middleware or matching phase, it should return true or nothing
+  //              otherwise return false to stop.
   //
   // Returns nothing.
   receiveMiddleware (middleware) {
@@ -290,14 +274,12 @@ class Robot {
   // message - A Message instance. Listeners can flag this message as 'done' to
   //           prevent further execution.
   //
-  // cb - Optional callback that is called when message processing is complete
-  //
-  // Returns nothing.
-  // Returns before executing callback
-  receive (message, cb) {
-    // When everything is finished (down the middleware stack and back up),
-    // pass control back to the robot
-    this.middleware.receive.execute({ response: new Response(this, message) }, this.processListeners.bind(this), cb)
+  // Returns array of results from listeners.
+  async receive (message) {
+    const context = { response: new Response(this, message) }
+    const shouldContinue = await this.middleware.receive.execute(context)
+    if (shouldContinue === false) return null
+    return await this.processListeners(context)
   }
 
   // Private: Passes the given message to any interested Listeners.
@@ -305,45 +287,62 @@ class Robot {
   // message - A Message instance. Listeners can flag this message as 'done' to
   //           prevent further execution.
   //
-  // done - Optional callback that is called when message processing is complete
-  //
-  // Returns nothing.
-  // Returns before executing callback
-  processListeners (context, done) {
+  // Returns array of results from listeners.
+  async processListeners (context) {
     // Try executing all registered Listeners in order of registration
     // and return after message is done being processed
+    const results = []
     let anyListenersExecuted = false
-
-    async.detectSeries(this.listeners, (listener, done) => {
+    for await (const listener of this.listeners) {
       try {
-        listener.call(context.response.message, this.middleware.listener, function (listenerExecuted) {
-          anyListenersExecuted = anyListenersExecuted || listenerExecuted
-          // Defer to the event loop at least after every listener so the
-          // stack doesn't get too big
-          process.nextTick(() =>
-            // Stop processing when message.done == true
-            done(null, context.response.message.done)
-          )
-        })
-      } catch (err) {
-        this.emit('error', err, new this.Response(this, context.response.message, []))
-        // Continue to next listener when there is an error
-        done(null, false)
-      }
-    },
-    // Ignore the result ( == the listener that set message.done = true)
-    _ => {
-      // If no registered Listener matched the message
-
-      if (!(context.response.message instanceof Message.CatchAllMessage) && !anyListenersExecuted) {
-        this.logger.debug('No listeners executed; falling back to catch-all')
-        this.receive(new Message.CatchAllMessage(context.response.message), done)
-      } else {
-        if (done != null) {
-          process.nextTick(done)
+        const match = listener.matcher(context.response.message)
+        if (!match) {
+          continue
         }
+        const result = await listener.call(context.response.message, this.middleware.listener)
+        results.push(result)
+        anyListenersExecuted = true
+      } catch (err) {
+        this.emit('error', err, context)
       }
-    })
+      if (context.response.message.done) {
+        break
+      }
+    }
+
+    if (!isCatchAllMessage(context.response.message) && !anyListenersExecuted) {
+      this.logger.debug('No listeners executed; falling back to catch-all')
+      try {
+        const result = await this.receive(new Message.CatchAllMessage(context.response.message))
+        results.push(result)
+      } catch (err) {
+        this.emit('error', err, context)
+      }
+    }
+
+    return results
+  }
+
+  async loadmjs (filePath) {
+    const script = await import(pathToFileURL(filePath))
+    if (typeof script?.default === 'function') {
+      script.default(this)
+    } else {
+      this.logger.warning(`Expected ${filePath} to assign a function to export default, got ${typeof script}`)
+    }
+  }
+
+  async loadcoffee (filePath) {
+    return await this.loadjs(filePath)
+  }
+
+  async loadjs (filePath) {
+    const script = require(filePath)
+    if (typeof script === 'function') {
+      script(this)
+    } else {
+      this.logger.warning(`Expected ${filePath} to assign a function to module.exports, got ${typeof script}`)
+    }
   }
 
   // Public: Loads a file in path.
@@ -352,27 +351,22 @@ class Robot {
   // filename - A String filename in path on the filesystem.
   //
   // Returns nothing.
-  loadFile (filepath, filename) {
-    const ext = path.extname(filename)
-    const full = path.join(filepath, path.basename(filename, ext))
+  async loadFile (filepath, filename) {
+    const ext = path.extname(filename)?.replace('.', '')
+    const full = path.join(filepath, path.basename(filename))
 
     // see https://github.com/hubotio/hubot/issues/1355
-    if (['.js', '.mjs', '.coffee'].indexOf(ext) == -1) { // eslint-disable-line
+    if (['js', 'mjs', 'coffee'].indexOf(ext) === -1) {
+      this.logger.debug(`Skipping unsupported file type ${full}`)
       return
     }
 
     try {
-      const script = require(full)
-
-      if (typeof script === 'function') {
-        script(this)
-        this.parseHelp(path.join(filepath, filename))
-      } else {
-        this.logger.warning(`Expected ${full} to assign a function to module.exports, got ${typeof script}`)
-      }
+      await this[`load${ext}`](full)
+      this.parseHelp(full)
     } catch (error) {
       this.logger.error(`Unable to load ${full}: ${error.stack}`)
-      process.exit(1)
+      throw error
     }
   }
 
@@ -381,11 +375,12 @@ class Robot {
   // path - A String path on the filesystem.
   //
   // Returns nothing.
-  load (path) {
+  async load (path) {
     this.logger.debug(`Loading scripts from ${path}`)
 
     if (fs.existsSync(path)) {
-      fs.readdirSync(path).sort().map(file => this.loadFile(path, file))
+      const tasks = fs.readdirSync(path).sort().map(file => this.loadFile(path, file))
+      await Promise.all(tasks)
     }
   }
 
@@ -406,7 +401,7 @@ class Robot {
       Object.keys(packages).forEach(key => require(key)(this, packages[key]))
     } catch (error) {
       this.logger.error(`Error loading scripts from npm package - ${error.stack}`)
-      process.exit(1)
+      throw error
     }
   }
 
@@ -461,9 +456,8 @@ class Robot {
       this.router = hasAuth ? privateRouter : publicRouter;
       this.publicRouter = publicRouter;
     } catch (error) {
-      const err = error
-      this.logger.error(`Error trying to start HTTP server: ${err}\n${err.stack}`)
-      process.exit(1)
+      this.logger.error(`Error trying to start HTTP server: ${error}\n${error.stack}`)
+      throw error
     }
 
     let herokuUrl = process.env.HEROKU_URL
@@ -509,15 +503,24 @@ class Robot {
       if (Array.from(HUBOT_DEFAULT_ADAPTERS).indexOf(this.adapterName) > -1) {
         this.adapter = this.requireAdapterFrom(path.resolve(path.join(__dirname, 'adapters', this.adapterName)))
       } else if (['.js', '.cjs', '.coffee'].includes(ext)) {
-        this.adapter = this.requireAdapterFrom(pathToFileURL(path.resolve(adapterPath)).pathname)
+        this.adapter = this.requireAdapterFrom(path.resolve(adapterPath))
       } else if (['.mjs'].includes(ext)) {
         this.adapter = await this.importAdapterFrom(pathToFileURL(path.resolve(adapterPath)).href)
       } else {
-        this.adapter = this.requireAdapterFrom(`hubot-${this.adapterName}`)
+        const adapterPathInCurrentWorkingDirectory = this.adapterName
+        try {
+          this.adapter = this.requireAdapterFrom(adapterPathInCurrentWorkingDirectory)
+        } catch (err) {
+          if (err.name === 'SyntaxError') {
+            this.adapter = await this.importAdapterFrom(adapterPathInCurrentWorkingDirectory)
+          } else {
+            throw err
+          }
+        }
       }
-    } catch (err) {
-      this.logger.error(`Cannot load adapter ${adapterPath ?? '[no path set]'} ${this.adapterName} - ${err}`)
-      process.exit(1)
+    } catch (error) {
+      this.logger.error(`Cannot load adapter ${adapterPath ?? '[no path set]'} ${this.adapterName} - ${error}`)
+      throw error
     }
   }
 
@@ -598,10 +601,8 @@ class Robot {
   // strings  - One or more Strings for each message to send.
   //
   // Returns whatever the extending adapter returns.
-  send (envelope/* , ...strings */) {
-    const strings = [].slice.call(arguments, 1)
-
-    return this.adapter.send.apply(this.adapter, [envelope].concat(strings))
+  async send (envelope, ...strings) {
+    return await this.adapter.send(envelope, ...strings)
   }
 
   // Public: A helper reply function which delegates to the adapter's reply
@@ -611,10 +612,8 @@ class Robot {
   // strings  - One or more Strings for each message to send.
   //
   // Returns whatever the extending adapter returns.
-  reply (envelope/* , ...strings */) {
-    const strings = [].slice.call(arguments, 1)
-
-    return this.adapter.reply.apply(this.adapter, [envelope].concat(strings))
+  async reply (envelope, ...strings) {
+    return await this.adapter.reply(envelope, ...strings)
   }
 
   // Public: A helper send function to message a room that the robot is in.
@@ -623,11 +622,9 @@ class Robot {
   // strings - One or more Strings for each message to send.
   //
   // Returns whatever the extending adapter returns.
-  messageRoom (room/* , ...strings */) {
-    const strings = [].slice.call(arguments, 1)
+  async messageRoom (room, ...strings) {
     const envelope = { room }
-
-    return this.adapter.send.apply(this.adapter, [envelope].concat(strings))
+    return await this.adapter.send(envelope, ...strings)
   }
 
   // Public: A wrapper around the EventEmitter API to make usage
@@ -638,10 +635,8 @@ class Robot {
   //            when event happens.
   //
   // Returns nothing.
-  on (event/* , ...args */) {
-    const args = [].slice.call(arguments, 1)
-
-    this.events.on.apply(this.events, [event].concat(args))
+  on (event, ...args) {
+    this.events.on(event, ...args)
   }
 
   // Public: A wrapper around the EventEmitter API to make usage
@@ -651,19 +646,17 @@ class Robot {
   // args...  - Arguments emitted by the event
   //
   // Returns nothing.
-  emit (event/* , ...args */) {
-    const args = [].slice.call(arguments, 1)
-
-    this.events.emit.apply(this.events, [event].concat(args))
+  emit (event, ...args) {
+    this.events.emit(event, ...args)
   }
 
   // Public: Kick off the event loop for the adapter
   //
-  // Returns nothing.
-  run () {
+  // Returns whatever the adapter returns.
+  async run () {
     this.emit('running')
 
-    this.adapter.run()
+    return await this.adapter.run()
   }
 
   // Public: Gracefully shutdown the robot process
@@ -673,13 +666,12 @@ class Robot {
     if (this.pingIntervalId != null) {
       clearInterval(this.pingIntervalId)
     }
-    process.removeListener('uncaughtException', this.onUncaughtException)
-    this.adapter.close()
+    this.adapter?.close()
     if (this.server) {
       this.server.close()
     }
-
     this.brain.close()
+    this.events.removeAllListeners()
   }
 
   // Public: The version of Hubot from npm

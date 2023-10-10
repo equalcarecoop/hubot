@@ -1,3 +1,5 @@
+![Pipeline Status](https://github.com/hubotio/hubot/actions/workflows/pipeline.yml/badge.svg)
+
 ![Build Status: MacOS](https://github.com/hubotio/hubot/actions/workflows/nodejs-macos.yml/badge.svg)
 ![Build Status: Ubuntu](https://github.com/hubotio/hubot/actions/workflows/nodejs-ubuntu.yml/badge.svg)
 ![Build Status: Window](https://github.com/hubotio/hubot/actions/workflows/nodejs-windows.yml/badge.svg)
@@ -14,6 +16,16 @@ for details on getting up and running with your very own robot friend.
 
 In most cases, you'll probably never have to hack on this repo directly if you
 are building your own bot. But if you do, check out [CONTRIBUTING.md](CONTRIBUTING.md)
+
+# Create your own Hubot instance
+
+This will create a directory called `myhubot` in the current working directory.
+
+```sh
+npx hubot --create myhubot --adapter @hubot-friends/hubot-slack
+```
+
+Review `scripts/example.mjs`. Create more scripts in the `scripts` folder.
 
 ## License
 
